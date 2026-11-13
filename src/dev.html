@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#05060c">
+<title>霓虹协议 · NEON PROTOCOL</title>
+<meta name="description" content="赛博朋克 2D 枪战：清剿 200 具失控义体，挑战 LJM-12138。">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="fx-scan"></div>
+<div class="fx-vignette"></div>
+
+<!-- ============== 主菜单 ============== -->
+<section id="menu" class="screen active">
+  <div class="menu-deco" aria-hidden="true">
+    <div class="deco-ring r1"></div>
+    <div class="deco-ring r2"></div>
+    <div class="deco-ring r3"></div>
+    <div class="deco-code">LJM-12138 // SIGNAL LOST</div>
+  </div>
+
+  <div class="menu-wrap">
+    <header class="brand">
+      <div class="brand-tag"><span class="dot"></span>九龙 07 区 · 垂直防线 · 失守</div>
+      <h1 class="title">霓虹<span class="slash">//</span>协议</h1>
+      <div class="title-en">N E O N &nbsp; P R O T O C O L</div>
+      <p class="tagline">清剿 200 具失控义体，然后去面对「它」。</p>
+    </header>
+
+    <div class="menu-body">
+      <div class="menu-left">
+        <div class="hero-strip">
+          <div class="hero-art"><canvas id="heroCanvas" width="240" height="300"></canvas></div>
+          <div class="hero-meta">
+            <div class="hm-name">霓虹 <em>NEON</em></div>
+            <div class="hm-role">义体特工 / 编号 07-11</div>
+            <ul class="hm-stats" id="heroStats"></ul>
+          </div>
+        </div>
+
+        <div class="menu-actions">
+          <button class="btn primary" id="btnStart"><span>启动清剿</span><small>ENTER</small></button>
+          <div class="btn-row">
+            <button class="btn" id="btnShop">义体强化 <b class="dia" id="menuDia">0</b></button>
+            <button class="btn" id="btnCodex">档案库</button>
+            <button class="btn" id="btnSettings">设置</button>
+          </div>
+        </div>
+
+        <div class="menu-foot">
+          <span>WASD 移动</span><i>/</i><span>鼠标瞄准 · 左键射击</span><i>/</i><span>SHIFT 相位冲刺</span><i>/</i><span>Q E R 技能</span>
+        </div>
+      </div>
+
+      <div class="menu-right">
+        <div class="panel-title"><span>选择难度</span><em>SELECT PROTOCOL</em></div>
+        <div class="diff-list" id="diffList"></div>
+        <div class="clear-tracks">
+          <div class="ct-title">通关记录</div>
+          <div class="ct-row" id="clearTracks"></div>
+          <div class="ct-hint" id="clearHint">通关简单 / 普通 / 困难后解锁噩梦</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="menu-version">v1.0 · 依据《游戏设定》构建 · 单文件离线可玩</div>
+  </div>
+</section>
+
+<!-- ============== 游戏画面 ============== -->
+<section id="playscreen" class="screen">
+  <canvas id="game"></canvas>
+
+  <div id="hud">
+    <!-- 左上：角色卡 -->
+    <div class="hud-left">
+      <div class="pcard">
+        <div class="pcard-portrait"><canvas id="portrait" width="112" height="112"></canvas></div>
+        <div class="pcard-main">
+          <div class="pcard-top">
+            <span class="pcard-name">霓虹</span>
+            <span class="pcard-lv" id="lvText">LV.01</span>
+          </div>
+          <div class="bar hp"><i id="hpFill"></i><span id="hpText">1850 / 1850</span></div>
+          <div class="bar xp"><i id="xpFill"></i><span id="xpText">0 / 100 XP</span></div>
+        </div>
+      </div>
+      <div class="chip-row">
+        <div class="chip"><span class="k">ATK</span><b id="atkText">350</b></div>
+        <div class="chip"><span class="k">DEF</span><b id="defText">52</b></div>
+        <div class="chip"><span class="k">CRIT</span><b id="critText">5%</b></div>
+      </div>
+    </div>
+
+    <!-- 顶部中间：任务进度 -->
+    <div class="hud-mid">
+      <div class="mission" id="mission">
+        <div class="mission-head">
+          <span class="m-label">清剿进度</span>
+          <span class="m-count"><b id="killCount">0</b><i>/ 200</i></span>
+        </div>
+        <div class="m-bar"><i id="killFill"></i></div>
+      </div>
+      <div id="timer" class="timer">00:00</div>
+    </div>
+
+    <!-- 右上：资源 -->
+    <div class="hud-right">
+      <div class="chip dia-chip"><span class="k">◆</span><b id="diamondCount">0</b></div>
+      <div class="chip diff-chip" id="diffChip">普通 ×2.5</div>
+      <button class="icon-btn" id="btnPause" title="暂停">❚❚</button>
+    </div>
+
+    <!-- BOSS 血条 -->
+    <div id="bossBar" class="boss-bar hidden">
+      <div class="boss-head">
+        <span class="boss-name">LJM-12138</span>
+        <span class="boss-sub" id="bossSub">终焉核心 · 原型机</span>
+        <span class="boss-tags" id="bossTags"></span>
+      </div>
+      <div class="boss-hp">
+        <i id="bossHpFill"></i>
+        <em id="bossHpText">100000 / 100000</em>
+        <b class="enrage-mark" title="25% 狂暴阈值"></b>
+        <b class="boss-shield" id="bossShield" hidden></b>
+      </div>
+    </div>
+
+    <!-- 技能栏 -->
+    <div id="skillbar">
+      <div class="skill" data-skill="dash">
+        <div class="sk-icon">⇥</div>
+        <div class="sk-key">SHIFT</div>
+        <div class="sk-name">相位冲刺</div>
+        <div class="sk-cd" id="cd-dash"></div>
+      </div>
+      <div class="skill" data-skill="q">
+        <div class="sk-icon">⚡</div>
+        <div class="sk-key">Q</div>
+        <div class="sk-name">超频协议</div>
+        <div class="sk-cd" id="cd-q"></div>
+      </div>
+      <div class="skill" data-skill="e">
+        <div class="sk-icon">◉</div>
+        <div class="sk-key">E</div>
+        <div class="sk-name">电磁脉冲</div>
+        <div class="sk-cd" id="cd-e"></div>
+      </div>
+      <div class="skill" data-skill="r">
+        <div class="sk-icon">✦</div>
+        <div class="sk-key">R</div>
+        <div class="sk-name">毁灭激光</div>
+        <div class="sk-cd" id="cd-r"></div>
+      </div>
+    </div>
+
+    <div id="banner" class="banner"></div>
+    <div id="toast" class="toast"></div>
+    <div id="bossIntro" class="boss-intro hidden">
+      <div class="bi-line"></div>
+      <div class="bi-name">LJM-12138</div>
+      <div class="bi-sub">终焉核心 · 原型机 · 苏醒</div>
+      <div class="bi-line"></div>
+    </div>
+  </div>
+
+  <!-- 升级选卡 -->
+  <div id="cardOverlay" class="overlay">
+    <div class="card-wrap">
+      <div class="card-head">
+        <div class="card-eyebrow">NEURAL LEVEL UP</div>
+        <h2>等级提升 <em id="cardLevel">LV.02</em></h2>
+        <p>选择一张协议卡，永久生效于本次清剿</p>
+      </div>
+      <div class="card-list" id="cardList"></div>
+      <div class="card-foot">按 <b>1</b> / <b>2</b> / <b>3</b> 快速选择</div>
+    </div>
+  </div>
+
+  <!-- 暂停 -->
+  <div id="pauseOverlay" class="overlay">
+    <div class="dialog">
+      <div class="dlg-title">行动暂停<em>PAUSED</em></div>
+      <div class="dlg-body">
+        <div class="pause-stats" id="pauseStats"></div>
+      </div>
+      <div class="dlg-actions">
+        <button class="btn primary" id="btnResume">继续行动</button>
+        <button class="btn" id="btnRestart">重新开始本关</button>
+        <button class="btn" id="btnPauseSettings">设置</button>
+        <button class="btn ghost" id="btnQuit">放弃并返回</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 结算 -->
+  <div id="resultOverlay" class="overlay">
+    <div class="result-wrap">
+      <div class="res-badge" id="resBadge">行动完成</div>
+      <h2 class="res-title" id="resultTitle">区域清剿完成</h2>
+      <p class="res-sub" id="resultSub"></p>
+      <div class="res-stats" id="resultStats"></div>
+      <div class="dlg-actions">
+        <button class="btn primary" id="btnAgain">再次清剿</button>
+        <button class="btn" id="btnResShare">复制战报</button>
+        <button class="btn" id="btnResShop">义体强化</button>
+        <button class="btn ghost" id="btnResMenu">返回主菜单</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============== 义体强化 ============== -->
+<div id="shopOverlay" class="overlay dome">
+  <div class="dome-wrap">
+    <div class="dome-head">
+      <div>
+        <div class="card-eyebrow">永久强化 · 数据写入义体</div>
+        <h2>义体强化</h2>
+      </div>
+      <div class="dome-dia">◆ <b id="shopDia">0</b><span>钻石</span></div>
+      <button class="icon-btn close" data-close="shopOverlay">✕</button>
+    </div>
+    <div class="shop-list" id="shopList"></div>
+    <div class="dome-foot">钻石为永久资源：死亡、重开、更换难度都不会清零。</div>
+  </div>
+</div>
+
+<!-- ============== 档案库 ============== -->
+<div id="codexOverlay" class="overlay dome">
+  <div class="dome-wrap">
+    <div class="dome-head">
+      <div>
+        <div class="card-eyebrow">DATABASE · 九龙 07 区</div>
+        <h2>档案库</h2>
+      </div>
+      <button class="icon-btn close" data-close="codexOverlay">✕</button>
+    </div>
+    <div class="codex-tabs" id="codexTabs">
+      <button class="tab active" data-tab="brief">行动简报</button>
+      <button class="tab" data-tab="enemy">敌人图鉴</button>
+      <button class="tab" data-tab="boss">首领档案</button>
+      <button class="tab" data-tab="system">规则细节</button>
+    </div>
+    <div class="codex-body" id="codexBody"></div>
+  </div>
+</div>
+
+<!-- ============== 设置 ============== -->
+<div id="settingsOverlay" class="overlay dome">
+  <div class="dome-wrap narrow">
+    <div class="dome-head">
+      <div>
+        <div class="card-eyebrow">SYSTEM · 偏好设置</div>
+        <h2>设置</h2>
+      </div>
+      <button class="icon-btn close" data-close="settingsOverlay">✕</button>
+    </div>
+    <div class="set-list">
+      <label class="set-row"><span>音效与背景音乐</span><input type="checkbox" id="setAudio" checked><i class="switch"></i></label>
+      <label class="set-row"><span>自动射击</span><input type="checkbox" id="setAuto" checked><i class="switch"></i></label>
+      <label class="set-row"><span>屏幕震动</span><input type="checkbox" id="setShake" checked><i class="switch"></i></label>
+      <label class="set-row"><span>显示伤害数字</span><input type="checkbox" id="setDmg" checked><i class="switch"></i></label>
+    </div>
+    <div class="share-block">
+      <div class="sb-title">存档分享码</div>
+      <p class="sb-hint">把这段代码发给朋友，对方粘贴导入即可继承你的钻石与强化进度。</p>
+      <textarea id="saveCode" spellcheck="false" placeholder="在此粘贴存档码后点击导入"></textarea>
+      <div class="sb-actions">
+        <button class="btn small" id="btnCopyCode">复制我的存档码</button>
+        <button class="btn small" id="btnImportCode">导入存档码</button>
+        <button class="btn small ghost" id="btnReset">清空进度</button>
+      </div>
+      <div class="sb-msg" id="sbMsg"></div>
+    </div>
+    <div class="dome-foot">游戏进度保存在浏览器本地（localStorage）。清除浏览器数据会丢失进度，建议定期导出存档码。</div>
+  </div>
+</div>
+
+<div id="bootError" class="boot-error" hidden></div>
+
+<script src="core.js"></script>
+<script src="cards.js"></script>
+<script src="entities.js"></script>
+<script src="boss.js"></script>
+<script src="game.js"></script>
+</body>
+</html>
