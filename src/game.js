@@ -17,7 +17,9 @@
       this.canvas = $('#game');
       this.ctx = this.canvas.getContext('2d', { alpha: false });
       this.cam = new NP.Camera();
-      this.world = { w: 2600, h: 1800 };
+      this.world = { w: 4200, h: 760 };   // 横版长卷
+      this.groundY = 640;              // 地面脚点
+      this.platforms = [];
       this.save = NP.Save;
       this.diff = 1;
       this.state = 'menu';
@@ -97,6 +99,9 @@
 
       // 自动开局（用于演示 / 截图）
       const qp = new URLSearchParams(location.search);
+      // ?tilt=1 可切回平面俯视（便于对比 / 排查观感）
+      const tiltP = parseFloat(qp.get('tilt'));
+      if (!isNaN(tiltP)) this.cam.tilt = NP.clamp(tiltP, 0.5, 1);
       if (qp.get('auto')) {
         setTimeout(() => {
           const d = NP.clamp(parseInt(qp.get('diff') || '1', 10) || 0, 0, 3);
@@ -152,7 +157,7 @@
       this.canvas.style.width = w + 'px';
       this.canvas.style.height = h + 'px';
       this.cam.resize(w, h);
-      this.cam.zoom = NP.clamp(Math.min(w, h) / 720, 0.68, 1.6);
+      this.cam.zoom = NP.clamp(h / 780, 0.8, 1.7);
     }
 
     /* ================= 界面 ================= */
@@ -226,6 +231,7 @@
       };
       bind('#setAudio', 'audio');
       bind('#setAuto', 'auto');
+      bind('#setLock', 'lock');
       bind('#setShake', 'shake');
       bind('#setDmg', 'dmgNum');
     }
@@ -234,6 +240,7 @@
       const s = this.save.data.settings;
       $('#setAudio').checked = s.audio;
       $('#setAuto').checked = s.auto;
+      $('#setLock').checked = s.lock !== false;
       $('#setShake').checked = s.shake;
       $('#setDmg').checked = s.dmgNum;
       NP.Audio.setEnabled(s.audio);
@@ -335,9 +342,10 @@
       // 让按钮失焦，否则空格/回车会再次触发「启动清剿」
       if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
       this.player = new NP.Player(this);
-      this.player.x = this.world.w / 2;
-      this.player.y = this.world.h / 2;
-      this.cam.x = this.player.x; this.cam.y = this.player.y;
+      this.buildPlatforms();
+      this.player.x = 560;
+      this.player.y = this.groundY;
+      this.cam.x = this.player.x; this.cam.y = this.world.h / 2;
       this.mobs = []; this.pBullets = []; this.mobBullets = []; this.orbs = [];
       this.particles = []; this.texts = []; this.rings = []; this.beams = [];
       this.fxBeams = []; this.firePatches = []; this.scorches = [];
@@ -393,26 +401,27 @@
     }
 
     spawnMob() {
-      const p = this.player;
-      const r = Math.random();
-      let type;
-      if (r < 0.44) type = 'assault';
-      else if (r < 0.74) type = 'tank';
-      else type = 'brute';
-      let x = 0, y = 0, ok = false;
-      for (let i = 0; i < 24 && !ok; i++) {
-        const a = NP.rand(0, TAU);
-        const d = NP.rand(680, 1150);
-        x = NP.clamp(p.x + Math.cos(a) * d, 60, this.world.w - 60);
-        y = NP.clamp(p.y + Math.sin(a) * d, 60, this.world.h - 60);
-        if (NP.dist({ x, y }, p) > 560) ok = true;
-      }
-      this.mobs.push(new NP.Mob(this, type, x, y));
-      this.spawned++;
-      this.burst(x, y, 6, 'rgba(255,47,125,.7)', 120, { life: 0.4, size: 2.5 });
-    }
+    const p = this.player;
+    const r = Math.random();
+    let type;
+    if (r < 0.44) type = 'assault';
+    else if (r < 0.74) type = 'tank';
+    else type = 'brute';
 
-    /* ================= 更新：敌人 ================= */
+    const side = Math.random() < 0.5 ? -1 : 1;
+    const dist = NP.rand(620, 980);
+    let x = p.x + side * dist;
+    x = NP.clamp(x, 60, this.world.w - 60);
+    // 空中单位：锋刃有几率浮空
+    const air = type === 'assault' && NP.chance(0.3);
+    const y = air ? NP.rand(260, this.groundY - 120) : this.groundY;
+
+    this.mobs.push(new NP.Mob(this, type, x, y, air));
+    this.spawned++;
+    this.burst(x, y - 20, 6, 'rgba(255,47,125,.7)', 120, { life: 0.4, size: 2.5 });
+  }
+
+  /* ================= 更新：敌人 ================= */
     updateMobs(dt) {
       const arr = this.mobs;
       for (let i = arr.length - 1; i >= 0; i--) {
@@ -455,60 +464,70 @@
 
     /* ================= 更新：子弹 ================= */
     updateBullets(dt) {
-      const p = this.player;
+    const p = this.player;
 
-      // 玩家子弹
-      for (let i = this.pBullets.length - 1; i >= 0; i--) {
-        const b = this.pBullets[i];
-        b.x += b.vx * dt; b.y += b.vy * dt;
-        b.life -= dt;
-        let dead = b.life <= 0;
-        if (!dead) {
-          // 敌人
-          for (const m of this.mobs) {
-            if (!m.alive || b.hit.has(m)) continue;
-            if (NP.dist2(b, m) < (m.r + b.r) * (m.r + b.r)) {
-              b.hit.add(m);
-              this.damageMob(m, b.dmg, b.crit, false);
-              this.hitSpark(b.x, b.y, b.color);
-              if (b.pierce-- <= 0) { dead = true; break; }
-            }
+    const hitMob = (b, m) => {
+      if (!m.alive) return false;
+      return Math.abs(b.x - m.x) < m.r + b.r &&
+        b.y > m.y - m.h - b.r && b.y < m.y + b.r;
+    };
+    const hitPlayer = (b) => {
+      return Math.abs(b.x - p.x) < p.r + b.r &&
+        b.y > p.y - p.h - b.r && b.y < p.y + b.r;
+    };
+
+    // 玩家子弹
+    for (let i = this.pBullets.length - 1; i >= 0; i--) {
+      const b = this.pBullets[i];
+      b.x += b.vx * dt; b.y += b.vy * dt;
+      b.life -= dt;
+      let dead = b.life <= 0;
+      if (!dead) {
+        for (const m of this.mobs) {
+          if (b.hit.has(m)) continue;
+          if (hitMob(b, m)) {
+            b.hit.add(m);
+            this.damageMob(m, b.dmg, b.crit, false);
+            this.hitSpark(b.x, b.y, b.color);
+            if (b.pierce-- <= 0) { dead = true; break; }
           }
         }
-        if (!dead) {
-          const targets = [this.boss, ...this.clones].filter((o) => o && o.alive);
-          for (const o of targets) {
-            if (b.hit.has(o)) continue;
-            if (NP.dist2(b, o) < (o.r + b.r) * (o.r + b.r)) {
-              b.hit.add(o);
-              this.damageBoss(o, b.dmg, b.crit, false);
-              this.hitSpark(b.x, b.y, b.color);
-              if (b.pierce-- <= 0) { dead = true; break; }
-            }
-          }
-        }
-        if (dead || b.x < 0 || b.y < 0 || b.x > this.world.w || b.y > this.world.h) this.pBullets.splice(i, 1);
       }
-
-      // 敌方子弹
-      for (let i = this.mobBullets.length - 1; i >= 0; i--) {
-        const b = this.mobBullets[i];
-        b.x += b.vx * dt; b.y += b.vy * dt;
-        b.life -= dt;
-        b.t = (b.t || 0) + dt;
-        let dead = b.life <= 0;
-        if (!dead && NP.dist2(b, p) < (b.r + p.r * 0.8) * (b.r + p.r * 0.8)) {
-          p.takeDamage(b.dmg);
-          this.hitSpark(b.x, b.y, b.color);
-          dead = true;
+      if (!dead) {
+        const targets = [this.boss, ...this.clones].filter((o) => o && o.alive);
+        for (const o of targets) {
+          if (b.hit.has(o)) continue;
+          if (Math.abs(b.x - o.x) < o.r + b.r && Math.abs(b.y - o.y) < o.r + b.r) {
+            b.hit.add(o);
+            this.damageBoss(o, b.dmg, b.crit, false);
+            this.hitSpark(b.x, b.y, b.color);
+            if (b.pierce-- <= 0) { dead = true; break; }
+          }
         }
-        if (dead || b.x < -100 || b.y < -100 || b.x > this.world.w + 100 || b.y > this.world.h + 100) {
-          this.mobBullets.splice(i, 1);
-        }
+      }
+      if (dead || b.x < -80 || b.y < -80 || b.x > this.world.w + 80 || b.y > this.world.h + 120) {
+        this.pBullets.splice(i, 1);
       }
     }
 
-    spawnMobBullet(x, y, ang, speed, dmg, r, color) {
+    // 敌方子弹
+    for (let i = this.mobBullets.length - 1; i >= 0; i--) {
+      const b = this.mobBullets[i];
+      b.x += b.vx * dt; b.y += b.vy * dt;
+      b.life -= dt;
+      let dead = b.life <= 0;
+      if (!dead && hitPlayer(b)) {
+        p.takeDamage(b.dmg);
+        this.hitSpark(b.x, b.y, b.color);
+        dead = true;
+      }
+      if (dead || b.x < -120 || b.y < -120 || b.x > this.world.w + 120 || b.y > this.world.h + 160) {
+        this.mobBullets.splice(i, 1);
+      }
+    }
+  }
+
+  spawnMobBullet(x, y, ang, speed, dmg, r, color) {
       this.mobBullets.push({
         x, y, vx: Math.cos(ang) * speed, vy: Math.sin(ang) * speed,
         dmg, r: r || 8, color: color || '#ff2f7d', life: 5, t: 0
@@ -597,6 +616,19 @@
       }
     }
 
+    /* ================= 平台 ================= */
+    buildPlatforms() {
+      this.platforms = [];
+      for (let i = 0; i < 18; i++) {
+        const x = 360 + i * 230 + NP.rand(-50, 50);
+        if (x > this.world.w - 320) break;
+        this.platforms.push({
+          x, y: NP.pick([400, 468, 516]) + NP.rand(-8, 8),
+          w: NP.rand(150, 250)
+        });
+      }
+    }
+
     /* ================= 索敌 ================= */
     nearestTarget(x, y, range) {
       let best = null, bd = (range || 900) * (range || 900);
@@ -624,7 +656,7 @@
       m.hp -= final;
       m.hitFlash = 1;
       if (!silent && this.save.data.settings.dmgNum) {
-        this.text(Math.round(final), m.x + NP.rand(-8, 8), m.y - m.r - 6,
+        this.text(Math.round(final), m.x + NP.rand(-8, 8), m.y - m.h - 8,
           crit ? '#ffd76b' : '#dff6ff', crit ? 16 : 13);
       }
       if (this.player) this.player.onDamageDealt && this.player.onDamageDealt(final, crit);
@@ -701,7 +733,7 @@
       NP.Audio.intensity = 1;
       this.boss = new NP.Boss(this, false);
       this.boss.x = this.world.w / 2;
-      this.boss.y = NP.clamp(this.player.y - 260, 160, this.world.h - 320);
+      this.boss.y = NP.clamp(this.groundY - 250, 200, this.groundY - 160);
       this.dom.bossBar.classList.remove('hidden');
       this.dom.bossBar.classList.add('show');
       if (this.dom.mission) this.dom.mission.classList.add('hidden');
@@ -1008,7 +1040,7 @@
       if (!p) return;
       for (const k of ['dash', 'q', 'e', 'r']) {
         const cd = p.cd[k];
-        const max = k === 'q' ? 15 * (1 - p.stats.cdr)
+        const max = k === 'q' ? 30 * (1 - p.stats.cdr)
           : k === 'e' ? 15 * (1 - p.stats.cdr)
             : k === 'r' ? 8 * (1 - p.stats.cdr)
               : this.skillMax.dash;
@@ -1172,63 +1204,116 @@
   };
 
   Game.prototype.drawFloor = function (ctx) {
-    const { w, h } = this.world;
-    const vw = this.cam.w / this.cam.zoom, vh = this.cam.h / this.cam.zoom;
-    const x0 = this.cam.x - vw / 2, y0 = this.cam.y - vh / 2;
-    const x1 = x0 + vw, y1 = y0 + vh;
+    const W = this.world.w, H = this.world.h, GY = this.groundY;
+    const camX = this.cam.x;
+    const viewW = this.cam.w / this.cam.zoom;
+    const x0 = camX - viewW / 2 - 200, x1 = camX + viewW / 2 + 200;
 
-    ctx.fillStyle = '#0b1220';
-    ctx.fillRect(0, 0, w, h);
+    // 天空 / 纵深底色
+    const sky = ctx.createLinearGradient(0, 0, 0, H);
+    sky.addColorStop(0, '#05070f');
+    sky.addColorStop(0.55, '#0a0f1d');
+    sky.addColorStop(1, '#08101c');
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, W, H);
 
-    // 大区块
+    // 远景楼群（视差 0.35）
     ctx.save();
-    for (let i = 0; i < 7; i++) {
-      const bx = (i * 431 + 120) % (w - 500);
-      const by = (i * 277 + 90) % (h - 420);
-      ctx.fillStyle = i % 2 ? 'rgba(22,32,54,.6)' : 'rgba(16,24,42,.75)';
-      ctx.fillRect(bx, by, 320 + (i % 3) * 90, 240 + (i % 2) * 110);
+    ctx.translate(camX * 0.65, 0);
+    const startI = Math.floor((camX * 0.35 - 200) / 260) - 1;
+    const endI = startI + Math.ceil(viewW / 260) + 3;
+    for (let i = startI; i < endI; i++) {
+      const rnd = (n) => { const v = Math.sin(n * 12.9898) * 43758.5453; return v - Math.floor(v); };
+      const bw = 120 + rnd(i) * 110;
+      const bh = 160 + rnd(i + 7) * 300;
+      const bx = i * 260 + rnd(i + 3) * 60;
+      const by = GY - bh;
+      ctx.fillStyle = '#080d18';
+      ctx.fillRect(bx, by, bw, bh);
+      ctx.strokeStyle = 'rgba(63,230,255,.10)';
+      ctx.lineWidth = 1.2;
+      ctx.strokeRect(bx, by, bw, bh);
+      // 窗灯
+      for (let wy = by + 18; wy < GY - 20; wy += 26) {
+        for (let wx = bx + 12; wx < bx + bw - 14; wx += 22) {
+          if (rnd(wx * 1.7 + wy) < 0.16) {
+            ctx.fillStyle = rnd(wx + wy) < 0.5 ? 'rgba(63,230,255,.35)' : 'rgba(255,47,125,.28)';
+            ctx.fillRect(wx, wy, 8, 12);
+          }
+        }
+      }
+      // 楼顶霓虹
+      ctx.fillStyle = 'rgba(255,47,125,.25)';
+      ctx.fillRect(bx + bw * 0.2, by - 4, bw * 0.6, 3);
     }
     ctx.restore();
 
-    // 网格
-    const step = 90;
-    ctx.strokeStyle = 'rgba(63,230,255,.085)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    const gx0 = Math.floor(x0 / step) * step;
-    const gy0 = Math.floor(y0 / step) * step;
-    for (let x = gx0; x < x1; x += step) { ctx.moveTo(x, y0); ctx.lineTo(x, y1); }
-    for (let y = gy0; y < y1; y += step) { ctx.moveTo(x0, y); ctx.lineTo(x1, y); }
-    ctx.stroke();
+    // 中景霓虹招牌条
+    ctx.save();
+    ctx.globalAlpha = 0.55;
+    for (let i = Math.floor(x0 / 420); i < x1 / 420; i++) {
+      const sx = i * 420 + 60;
+      const sy = 200 + ((i * 37) % 3) * 70;
+      ctx.fillStyle = i % 2 ? 'rgba(160,107,255,.16)' : 'rgba(63,230,255,.14)';
+      ctx.fillRect(sx, sy, 90, 16);
+      ctx.fillStyle = i % 2 ? 'rgba(255,47,125,.10)' : 'rgba(63,230,255,.08)';
+      ctx.fillRect(sx + 10, sy + 24, 54, 8);
+    }
+    ctx.restore();
 
-    // 装饰
-    for (const d of this.decor) {
-      if (d.x < x0 - 200 || d.x > x1 + 200 || d.y < y0 - 200 || d.y > y1 + 200) continue;
-      this.drawDecor(ctx, d);
+    // 地面
+    const gg = ctx.createLinearGradient(0, GY, 0, H);
+    gg.addColorStop(0, '#16233a');
+    gg.addColorStop(0.16, '#0d1526');
+    gg.addColorStop(1, '#070b13');
+    ctx.fillStyle = gg;
+    ctx.fillRect(0, GY, W, H - GY);
+
+    // 地面发光边 + 地砖线
+    ctx.strokeStyle = 'rgba(63,230,255,.55)';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(0, GY); ctx.lineTo(W, GY); ctx.stroke();
+    ctx.strokeStyle = 'rgba(63,230,255,.10)';
+    ctx.lineWidth = 1;
+    for (let x = Math.floor(x0 / 120) * 120; x < x1; x += 120) {
+      ctx.beginPath(); ctx.moveTo(x, GY + 6); ctx.lineTo(x - 40, H); ctx.stroke();
+    }
+    for (let y = GY + 34; y < H; y += 34) {
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
     }
 
-    // 场景边缘
-    ctx.strokeStyle = 'rgba(255,47,125,.5)';
-    ctx.lineWidth = 3;
-    ctx.strokeRect(2, 2, w - 4, h - 4);
-    ctx.strokeStyle = 'rgba(63,230,255,.25)';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(12, 12, w - 24, h - 24);
+    // 平台
+    for (const p of this.platforms) {
+      if (p.x + p.w < x0 || p.x > x1) continue;
+      const pg = ctx.createLinearGradient(0, p.y, 0, p.y + 18);
+      pg.addColorStop(0, '#243b5c');
+      pg.addColorStop(1, '#0c1626');
+      ctx.fillStyle = pg;
+      ctx.fillRect(p.x, p.y, p.w, 16);
+      ctx.strokeStyle = 'rgba(63,230,255,.7)';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(p.x + p.w, p.y); ctx.stroke();
+      ctx.fillStyle = 'rgba(0,0,0,.5)';
+      ctx.fillRect(p.x, p.y + 16, p.w, 8);
+      // 支架
+      ctx.strokeStyle = 'rgba(63,230,255,.18)';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(p.x + 14, p.y + 16); ctx.lineTo(p.x + 26, p.y + 66); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(p.x + p.w - 14, p.y + 16); ctx.lineTo(p.x + p.w - 26, p.y + 66); ctx.stroke();
+    }
 
-    // 焦痕
+    // 焦痕 / 火焰
     for (const s of this.scorches) {
       const a = s.life / s.max;
       ctx.save();
-      ctx.globalAlpha = a * 0.5;
+      ctx.globalAlpha = a * 0.45;
       const g = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, s.r);
       g.addColorStop(0, 'rgba(30,10,20,.9)');
       g.addColorStop(1, 'rgba(0,0,0,0)');
       ctx.fillStyle = g;
-      ctx.beginPath(); ctx.ellipse(s.x, s.y, s.r, s.r * 0.7, 0, 0, TAU); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(s.x, s.y, s.r, s.r * 0.4, 0, 0, TAU); ctx.fill();
       ctx.restore();
     }
-
-    // 火焰路径
     for (const f of this.firePatches) {
       const a = NP.clamp(f.life / 3, 0, 1);
       ctx.save();
@@ -1238,20 +1323,14 @@
       g.addColorStop(0.5, `rgba(255,80,40,${0.3 * a})`);
       g.addColorStop(1, 'rgba(120,20,0,0)');
       ctx.fillStyle = g;
-      ctx.beginPath(); ctx.arc(f.x, f.y, f.r, 0, TAU); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(f.x, f.y, f.r, f.r * 0.55, 0, 0, TAU); ctx.fill();
       ctx.restore();
     }
 
-    // 浮尘
-    ctx.save();
-    ctx.globalCompositeOperation = 'lighter';
-    for (const a of this.ambient) {
-      const ax = (a.x + this.time * a.sp * 0.3) % w;
-      const ay = (a.y + Math.sin(this.time * 0.6 + a.ph) * 20 + h) % h;
-      ctx.fillStyle = `rgba(120,220,255,${0.05 + a.z * 0.09})`;
-      ctx.fillRect(ax, ay, 2 * a.z, 2 * a.z);
-    }
-    ctx.restore();
+    // 世界边界
+    ctx.strokeStyle = 'rgba(255,47,125,.35)';
+    ctx.lineWidth = 3;
+    ctx.strokeRect(2, 2, W - 4, H - 4);
   };
 
   Game.prototype.drawDecor = function (ctx, d) {
@@ -1270,40 +1349,62 @@
       ctx.lineWidth = 1;
       ctx.beginPath(); ctx.ellipse(0, 0, d.r * 0.8, d.r * d.sq * 0.8, 0, 0, TAU); ctx.stroke();
       ctx.restore();
-    } else if (d.type === 'pillar') {
+    } else if (d.type === 'pillar' || d.type === 'crate') {
+      // 立体柱体：地面阴影跟随视角压缩，竖直面抵消压缩保持真实高度
+      const K = this.cam.tilt || 1;
+      const isCrate = d.type === 'crate';
+      const H = isCrate ? d.h * 0.55 : d.h;
+      const DEP = d.w * 0.42;
+      const hw = d.w / 2;
+
       ctx.save();
       ctx.translate(d.x, d.y);
-      ctx.rotate(d.rot);
-      const g = ctx.createLinearGradient(-d.w / 2, 0, d.w / 2, 0);
-      g.addColorStop(0, 'rgba(8,12,20,.9)');
-      g.addColorStop(0.5, 'rgba(20,30,48,.95)');
-      g.addColorStop(1, 'rgba(6,10,18,.9)');
-      ctx.fillStyle = g;
-      ctx.fillRect(-d.w / 2, -d.h / 2, d.w, d.h);
-      ctx.strokeStyle = `rgba(${hue},.28)`;
-      ctx.lineWidth = 1.5;
-      ctx.strokeRect(-d.w / 2, -d.h / 2, d.w, d.h);
-      ctx.strokeStyle = `rgba(${hue},.12)`;
-      for (let i = 1; i < 4; i++) {
-        ctx.beginPath();
-        ctx.moveTo(-d.w / 2 + 4, -d.h / 2 + (d.h / 4) * i);
-        ctx.lineTo(d.w / 2 - 4, -d.h / 2 + (d.h / 4) * i);
-        ctx.stroke();
-      }
-      ctx.restore();
-    } else if (d.type === 'crate') {
-      ctx.save();
-      ctx.translate(d.x, d.y);
-      ctx.fillStyle = 'rgba(14,20,34,.95)';
-      ctx.fillRect(-d.w / 2, -d.h / 2, d.w, d.h);
-      ctx.strokeStyle = `rgba(${hue},.35)`;
-      ctx.lineWidth = 2;
-      ctx.strokeRect(-d.w / 2, -d.h / 2, d.w, d.h);
+
+      // 地面阴影（处于未补偿的相机空间，自动被压扁）
+      ctx.fillStyle = 'rgba(0,0,0,.45)';
       ctx.beginPath();
-      ctx.moveTo(-d.w / 2, -d.h / 2); ctx.lineTo(d.w / 2, d.h / 2);
-      ctx.moveTo(d.w / 2, -d.h / 2); ctx.lineTo(-d.w / 2, d.h / 2);
-      ctx.strokeStyle = `rgba(${hue},.14)`;
-      ctx.stroke();
+      ctx.ellipse(0, 0, hw * 1.35, hw * 0.55, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // 竖直面：抵消纵向压缩
+      ctx.scale(1, 1 / K);
+
+      // 正面
+      const g = ctx.createLinearGradient(-hw, -H, hw, 0);
+      g.addColorStop(0, 'rgba(16,25,42,.98)');
+      g.addColorStop(0.55, 'rgba(11,18,31,.98)');
+      g.addColorStop(1, 'rgba(6,10,18,.98)');
+      ctx.fillStyle = g;
+      ctx.fillRect(-hw, -H, d.w, H);
+
+      // 顶面
+      ctx.fillStyle = 'rgba(28,41,64,.98)';
+      ctx.fillRect(-hw, -H - DEP, d.w, DEP);
+
+      // 轮廓
+      ctx.strokeStyle = `rgba(${hue},.42)`;
+      ctx.lineWidth = 1.4;
+      ctx.strokeRect(-hw, -H, d.w, H);
+      ctx.strokeStyle = `rgba(${hue},.55)`;
+      ctx.strokeRect(-hw, -H - DEP, d.w, DEP);
+
+      // 正面霓虹横条
+      ctx.fillStyle = `rgba(${hue},.5)`;
+      const bars = isCrate ? 2 : 3;
+      for (let i = 0; i < bars; i++) {
+        ctx.fillRect(-hw + 3, -H + 8 + i * (H / (bars + 1)), d.w - 6, 2);
+      }
+      // 顶面高光条
+      ctx.fillStyle = `rgba(${hue},.75)`;
+      ctx.fillRect(-hw + 2, -H - DEP + 2, d.w - 4, 2);
+
+      // 侧面暗部（右侧受光更弱）
+      const side = ctx.createLinearGradient(hw - d.w * 0.22, 0, hw, 0);
+      side.addColorStop(0, 'rgba(0,0,0,0)');
+      side.addColorStop(1, 'rgba(0,0,0,.45)');
+      ctx.fillStyle = side;
+      ctx.fillRect(hw - d.w * 0.22, -H, d.w * 0.22, H);
+
       ctx.restore();
     } else if (d.type === 'circuit') {
       ctx.save();
@@ -1406,7 +1507,7 @@
     this.drawFloor(ctx);
 
     // 掉落
-    for (const o of this.orbs) o.draw(ctx, this.time);
+    for (const o of this.orbs) o.draw(ctx, this.time, this);
 
     // 敌人
     for (const m of this.mobs) m.draw(ctx, this.time);
@@ -1427,18 +1528,40 @@
     // 粒子
     this.drawParticles(ctx);
 
+    // 地面准心：手动瞄准时指示子弹落点（锁定敌人时改由锁定框提示）
+    if (!this.autoplay && !(this.player && this.player.lockTarget)) {
+      const m = NP.Input.mouse;
+      const w = this.cam.screenToWorld(m.x, m.y);
+      if (w.x > 0 && w.y > 0 && w.x < this.world.w && w.y < this.world.h) {
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.strokeStyle = 'rgba(63,230,255,.55)';
+        ctx.lineWidth = 1.4;
+        ctx.beginPath(); ctx.ellipse(w.x, w.y, 15, 6, 0, 0, TAU); ctx.stroke();
+        ctx.beginPath(); ctx.ellipse(w.x, w.y, 26, 10.5, 0, 0, TAU); ctx.strokeStyle = 'rgba(63,230,255,.2)'; ctx.stroke();
+        ctx.strokeStyle = 'rgba(255,47,125,.8)';
+        ctx.beginPath();
+        ctx.moveTo(w.x - 5, w.y); ctx.lineTo(w.x + 5, w.y);
+        ctx.moveTo(w.x, w.y - 2.5); ctx.lineTo(w.x, w.y + 2.5);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
     // 浮动文字
     for (const t of this.texts) {
       const a = NP.clamp(t.life / t.max, 0, 1);
       ctx.save();
       ctx.globalAlpha = a;
+      ctx.translate(t.x, t.y);
+      ctx.scale(1, 1 / (this.cam.tilt || 1));   // 文字保持直立
       ctx.font = `600 ${t.size}px "Bahnschrift", "Consolas", sans-serif`;
       ctx.textAlign = 'center';
       ctx.lineWidth = 3;
       ctx.strokeStyle = 'rgba(0,0,0,.75)';
-      ctx.strokeText(t.str, t.x, t.y);
+      ctx.strokeText(t.str, 0, 0);
       ctx.fillStyle = t.color;
-      ctx.fillText(t.str, t.x, t.y);
+      ctx.fillText(t.str, 0, 0);
       ctx.restore();
     }
 
@@ -1798,8 +1921,8 @@
           <li>生命 = <b>1500 + 350 × 等级</b>；攻击 = <b>300 + 50 × 等级</b>；防御 = <b>50 + 2.5 × 等级</b>。</li>
           <li>每 1 点防御使受到的伤害减少 <b>0.02%</b>（上限 70%）。</li>
           <li>等级 = 1 + ⌊经验 / 100⌋；每级额外提升 12% 生命的即时回复。</li>
-          <li>超频协议：攻速 <b>+300%</b>（射速 ×4）、伤害 <b>+150%</b>（×2.5）、吸血 <b>20%</b>，持续 10 秒，冷却 15 秒。</li>
-          <li>电磁脉冲：范围 420 内敌人停止行动 <b>5 秒</b>，并回复自身 <b>50%</b> 生命，冷却 15 秒。首领对控制有抗性，仅被压制 1.4 秒。</li>
+          <li>超频协议：攻速 <b>+300%</b>（射速 ×4）、伤害 <b>+150%</b>（×2.5）、吸血 <b>10%</b>，持续 10 秒，冷却 30 秒。</li>
+          <li>电磁脉冲：范围 420 内敌人停止行动 <b>5 秒</b>，并回复自身 <b>30%</b> 生命，冷却 15 秒。首领对控制有抗性，仅被压制 1.4 秒。</li>
           <li>毁灭激光：造成 <b>1000 + 0.08×攻击 + 0.02×最大生命</b> 的贯穿伤害，冷却 8 秒。</li>
           <li>相位冲刺：0.16 秒位移，期间 <b>完全免疫伤害</b>，冷却约 1.8 秒。</li>
           <li>首领单次受到的减伤上限 70%，因此高难度下需要靠协议卡与钻石强化堆叠火力。</li>

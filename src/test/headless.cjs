@@ -444,6 +444,50 @@ check('键盘 / 鼠标输入绑定', () => {
   return `按住 D 半秒：x ${x0.toFixed(0)} → ${p.x.toFixed(0)}`;
 });
 
+/* 11c 横版物理 */
+check('横版跳跃 / 落地', () => {
+  const p = freshRun(0);
+  G.autoplay = false;
+  const fire = (type, ev) => (winListeners[type] || []).forEach((f) => f(ev));
+  const y0 = p.y;
+  if (Math.abs(y0 - G.groundY) > 1) throw new Error('玩家未站在地面: ' + y0);
+  const sp = { code: 'Space', preventDefault() { } };
+  fire('keydown', sp);
+  for (let i = 0; i < 18; i++) G.step(1 / 60);
+  const yMid = p.y;
+  if (!(yMid < y0 - 40)) throw new Error('跳跃未生效 ' + y0 + ' -> ' + yMid);
+  fire('keyup', sp);
+  for (let i = 0; i < 150; i++) G.step(1 / 60);
+  if (Math.abs(p.y - y0) > 2) throw new Error('未落回地面 ' + p.y);
+  return `起跳高度 ${Math.round(y0 - yMid)}px，落回 y=${Math.round(p.y)}`;
+});
+
+/* 11d 自动锁定 */
+check('攻击自动锁定 / 手动接管', () => {
+  const p = freshRun(0);
+  G.autoplay = false;
+  NP.Save.data.settings.lock = true;
+  NP.Save.data.settings.auto = true;
+  G.mobs.length = 0;
+  G.clones.length = 0;
+  G.boss = null;
+  const m = new NP.Mob(G, 'assault', p.x + 300, G.groundY, false);
+  m.spawnT = 0;
+  G.mobs.push(m);
+  p._mx = NP.Input.mouse.x;
+  p._my = NP.Input.mouse.y;
+  for (let i = 0; i < 6; i++) G.step(1 / 60);
+  if (p.lockTarget !== m) throw new Error('未锁定最近的敌人');
+  const want = Math.atan2(m.cy - p.chestY, m.x - p.x);
+  if (Math.abs(p.aim - want) > 0.06) throw new Error('锁定角度不正确 ' + p.aim.toFixed(2) + ' vs ' + want.toFixed(2));
+
+  NP.Input.mouse.x += 45;
+  NP.Input.mouse.y += 25;
+  G.step(1 / 60);
+  if (p.lockTarget) throw new Error('移动鼠标后未切回手动瞄准');
+  return `锁定角度 ${want.toFixed(2)}，移动鼠标后已转手动`;
+});
+
 /* 12 */ check('死亡流程', () => {
   const p = freshRun(1);
   p.iframe = 0;

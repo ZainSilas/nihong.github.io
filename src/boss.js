@@ -70,6 +70,7 @@
     }
 
     get alive() { return !this.dead && this.hp > 0; }
+    get cy() { return this.y; }
 
     /* 技能频率：噩梦翻倍；狂暴 +25% */
     get freq() {
@@ -173,7 +174,7 @@
 
       // 边界
       this.x = NP.clamp(this.x, this.r, G.world.w - this.r);
-      this.y = NP.clamp(this.y, this.r, G.world.h - this.r);
+      this.y = NP.clamp(this.y, 140, G.groundY - 110);
 
       // 冲刺拖尾
       for (let i = this.trail.length - 1; i >= 0; i--) {
@@ -294,7 +295,7 @@
           c.fireT = (c.fireT || 0) + dt;
           if (c.fireT >= 0.05) {
             c.fireT = 0;
-            G.firePatches.push({ x: this.x, y: this.y, r: 46, life: 3, dps: 500, t: 0 });
+            G.firePatches.push({ x: this.x, y: G.groundY, r: 46, life: 3, dps: 500, t: 0 });
           }
           if (NP.dist(this, p) < this.r + p.r + 12) {
             const dmg = 2000 + 0.3 * this.atk + 5 * this.elapsed;
@@ -386,7 +387,7 @@
       // 地面阴影
       ctx.save();
       ctx.fillStyle = 'rgba(0,0,0,.45)';
-      ctx.beginPath(); ctx.ellipse(this.x, this.y + r * 0.55, r * 1.05, r * 0.3, 0, 0, TAU); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(this.x, Math.min((this.G.groundY || this.y + r * 0.55), this.y + r * 0.55), r * 1.05, r * 0.26, 0, 0, TAU); ctx.fill();
       ctx.restore();
 
       // 施法预警
@@ -425,6 +426,7 @@
       // 外环（旋转六段）
       ctx.save();
       ctx.translate(cx, cy);
+      ctx.scale(1, 1 / (this.G.cam.tilt || 1));
       ctx.rotate(this.ringA);
       const segs = 6;
       for (let i = 0; i < segs; i++) {
@@ -454,6 +456,7 @@
       // 内环（反向旋转虚线）
       ctx.save();
       ctx.translate(cx, cy);
+      ctx.scale(1, 1 / (this.G.cam.tilt || 1));
       ctx.rotate(-this.ringA * 1.6);
       ctx.strokeStyle = this.isClone ? 'rgba(160,107,255,.3)' : 'rgba(63,230,255,.26)';
       ctx.lineWidth = 1.6;
@@ -469,6 +472,7 @@
       ctx.restore();
       ctx.save();
       ctx.translate(cx, cy);
+      ctx.scale(1, 1 / (this.G.cam.tilt || 1));
       const g = ctx.createRadialGradient(-r * 0.3, -r * 0.4, r * 0.2, 0, 0, r);
       g.addColorStop(0, this.isClone ? '#3c2a66' : '#2b1a2e');
       g.addColorStop(0.55, this.isClone ? '#241640' : '#17101f');

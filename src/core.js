@@ -50,7 +50,7 @@
     cleared: [false, false, false, false],
     best: [0, 0, 0, 0],
     runs: 0, kills: 0, bossKills: 0, deaths: 0,
-    settings: { audio: true, auto: true, shake: true, dmgNum: true }
+    settings: { audio: true, auto: true, shake: true, dmgNum: true, lock: true }
   };
 
   function deepClone(o) { return JSON.parse(JSON.stringify(o)); }
@@ -384,10 +384,13 @@
 
   /* ---------------- 相机 ---------------- */
   NP.Camera = class {
-    constructor() { this.x = 0; this.y = 0; this.zoom = 1; this.shake = 0; this.sx = 0; this.sy = 0; this.w = 1280; this.h = 720; }
+    constructor() {
+      this.x = 0; this.y = 0; this.zoom = 1; this.shake = 0; this.sx = 0; this.sy = 0; this.w = 1280; this.h = 720;
+      this.tilt = 0.78;   // 纵向压缩，模拟 3/4 俯视（立体视角）
+    }
     resize(w, h) { this.w = w; this.h = h; }
     follow(tx, ty, dt, ww, wh) {
-      const halfW = this.w / 2 / this.zoom, halfH = this.h / 2 / this.zoom;
+      const halfW = this.w / 2 / this.zoom, halfH = this.h / 2 / (this.zoom * this.tilt);
       let cx = tx, cy = ty;
       if (ww > halfW * 2) cx = NP.clamp(cx, halfW, ww - halfW); else cx = ww / 2;
       if (wh > halfH * 2) cy = NP.clamp(cy, halfH, wh - halfH); else cy = wh / 2;
@@ -402,11 +405,14 @@
     }
     apply(ctx) {
       ctx.translate(this.w / 2 + this.sx, this.h / 2 + this.sy);
-      ctx.scale(this.zoom, this.zoom);
+      ctx.scale(this.zoom, this.zoom * this.tilt);
       ctx.translate(-this.x, -this.y);
     }
     screenToWorld(sx, sy) {
-      return { x: (sx - this.w / 2 - this.sx) / this.zoom + this.x, y: (sy - this.h / 2 - this.sy) / this.zoom + this.y };
+      return {
+        x: (sx - this.w / 2 - this.sx) / this.zoom + this.x,
+        y: (sy - this.h / 2 - this.sy) / (this.zoom * this.tilt) + this.y
+      };
     }
   };
 
@@ -455,12 +461,13 @@
     drawHero(ctx, o) {
       const {
         x = 0, y = 0, scale = 1, aim = 0, facing = 1, t = 0,
-        hurt = 0, dash = 0, over = 0, alpha = 1, walk = 0, showGun = true
+        hurt = 0, dash = 0, over = 0, alpha = 1, walk = 0, showGun = true, tilt = 1
       } = o;
       ctx.save();
       ctx.globalAlpha = alpha;
       ctx.translate(x, y);
       ctx.scale(scale, scale);
+      if (tilt && tilt !== 1) ctx.scale(1, 1 / tilt);   // 抵消相机纵向压缩，让角色保持直立比例
       const bob = Math.sin(t * 6) * 1.3 + walk * Math.sin(t * 17) * 1.7;
       const swing = walk * Math.sin(t * 17);
       const overC = over > 0;
@@ -633,5 +640,176 @@
       }
       ctx.restore();
     },
+    /* 侧视角色：横版用，脚点在原点，朝向 +x */
+    drawHeroSide(ctx, o) {
+      const { over = 0, hurt = 0, t = 0, walk = 0, air = false, aim = 0, dash = 0 } = o;
+      const overC = over > 0;
+      const accent = overC ? '#ff2f7d' : '#3fe6ff';
+      const bob = Math.sin(t * 13) * (walk > 0.2 ? 1.7 : 0.7);
+      const swing = Math.sin(t * 15) * walk;
+      const lift = air ? 4 : 0;
+
+      // 影子
+      ctx.fillStyle = 'rgba(0,0,0,.45)';
+      ctx.beginPath(); ctx.ellipse(0, 1, 21, 5.5, 0, 0, TAU); ctx.fill();
+
+      // 后腿
+      ctx.strokeStyle = '#16233a';
+      ctx.lineWidth = 8;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(-2, -22);
+      ctx.lineTo(-6 - swing * 7, -12 - lift);
+      ctx.lineTo(-8 - swing * 9, -1 - lift);
+      ctx.stroke();
+      ctx.strokeStyle = 'rgba(63,230,255,.5)';
+      ctx.lineWidth = 1.4;
+      ctx.beginPath(); ctx.moveTo(-6 - swing * 7, -12 - lift); ctx.lineTo(-8 - swing * 9, -3 - lift); ctx.stroke();
+
+      // 后手
+      ctx.strokeStyle = '#1d2f4c';
+      ctx.lineWidth = 7;
+      ctx.beginPath(); ctx.moveTo(-4, -44 + bob); ctx.lineTo(-14, -34 + bob); ctx.stroke();
+
+      // 披风 / 风衣下摆
+      ctx.fillStyle = 'rgba(20,32,54,.95)';
+      ctx.beginPath();
+      ctx.moveTo(-6, -46 + bob);
+      ctx.quadraticCurveTo(-24 - Math.abs(swing) * 6, -30 + bob, -18 - swing * 6, -12 + bob);
+      ctx.lineTo(-2, -18 + bob);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(63,230,255,.25)';
+      ctx.lineWidth = 1.2; ctx.stroke();
+
+      // 躯干
+      const g = ctx.createLinearGradient(-10, -52, 12, -18);
+      g.addColorStop(0, '#3b5a88');
+      g.addColorStop(0.6, '#25405f');
+      g.addColorStop(1, '#131f34');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.moveTo(-7, -52 + bob);
+      ctx.lineTo(9, -50 + bob);
+      ctx.lineTo(11, -22 + bob);
+      ctx.lineTo(-6, -20 + bob);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(150,235,255,.35)';
+      ctx.lineWidth = 1.2; ctx.stroke();
+
+      // 胸灯
+      ctx.fillStyle = accent;
+      ctx.beginPath(); ctx.arc(4, -38 + bob, 2.4, 0, TAU); ctx.fill();
+      NP.Art.drawGlow(ctx, 4, -38 + bob, 12, overC ? 'rgba(255,47,125,.9)' : 'rgba(63,230,255,.9)', .5);
+
+      // 腰带
+      ctx.fillStyle = '#0a1424';
+      ctx.fillRect(-6, -26 + bob, 16, 4);
+
+      // 前腿
+      ctx.strokeStyle = '#1d2f4c';
+      ctx.lineWidth = 9;
+      ctx.beginPath();
+      ctx.moveTo(2, -22);
+      ctx.lineTo(6 + swing * 8, -12 - lift);
+      ctx.lineTo(9 + swing * 10, -1);
+      ctx.stroke();
+      // 靴
+      ctx.fillStyle = '#0b1322';
+      ctx.beginPath(); ctx.ellipse(10 + swing * 10, -2, 7, 3.4, 0, 0, TAU); ctx.fill();
+      ctx.fillStyle = '#b6ff4a';
+      ctx.fillRect(6 + swing * 10, -3, 7, 1.6);
+
+      // 头
+      const hy = -62 + bob;
+      ctx.fillStyle = '#f4cba8';
+      ctx.beginPath(); ctx.arc(0, hy, 11, 0, TAU); ctx.fill();
+      // 头发（向后扫）
+      ctx.fillStyle = '#e0286d';
+      ctx.beginPath();
+      ctx.moveTo(-11, hy - 2);
+      ctx.lineTo(-16, hy - 9);
+      ctx.lineTo(-9, hy - 10);
+      ctx.lineTo(-12, hy - 17);
+      ctx.lineTo(-3, hy - 13);
+      ctx.lineTo(2, hy - 18);
+      ctx.lineTo(5, hy - 11);
+      ctx.lineTo(12, hy - 6);
+      ctx.lineTo(9, hy + 2);
+      ctx.lineTo(0, hy - 3);
+      ctx.lineTo(-8, hy - 1);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = '#3fe6ff';
+      ctx.beginPath();
+      ctx.moveTo(2, hy - 18); ctx.lineTo(5, hy - 11); ctx.lineTo(8, hy - 13); ctx.lineTo(5, hy - 17);
+      ctx.closePath(); ctx.fill();
+
+      // 耳机
+      ctx.fillStyle = '#0c1729';
+      ctx.beginPath(); ctx.arc(-9, hy + 1, 3.4, 0, TAU); ctx.fill();
+      ctx.fillStyle = accent;
+      ctx.fillRect(-11, hy + 0.5, 2.4, 2.4);
+
+      // 护目镜（朝右）
+      ctx.fillStyle = 'rgba(8,16,28,.96)';
+      ctx.beginPath();
+      ctx.moveTo(-4, hy - 4.2);
+      ctx.lineTo(10.5, hy - 3.4);
+      ctx.lineTo(10.5, hy + 3.6);
+      ctx.lineTo(-4, hy + 4.2);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = overC ? 'rgba(255,47,125,.85)' : 'rgba(63,230,255,.8)';
+      ctx.lineWidth = 1.1; ctx.stroke();
+      ctx.fillStyle = overC ? '#ffd0e2' : '#c9f8ff';
+      ctx.beginPath(); ctx.ellipse(5, hy + 0.4, 2.8, 2.6, 0, 0, TAU); ctx.fill();
+      NP.Art.drawGlow(ctx, 5, hy, 17, overC ? 'rgba(255,47,125,.9)' : 'rgba(63,230,255,.9)', .42);
+
+      // 天线
+      ctx.strokeStyle = 'rgba(63,230,255,.8)'; ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.moveTo(9, hy - 6); ctx.lineTo(13, hy - 14); ctx.stroke();
+      ctx.fillStyle = '#b6ff4a';
+      ctx.beginPath(); ctx.arc(13, hy - 15, 2, 0, TAU); ctx.fill();
+
+      // 枪臂
+      const sx = 6, sy = -46 + bob;
+      const a = aim;
+      const hx = sx + Math.cos(a) * 20, hyy = sy + Math.sin(a) * 20;
+      ctx.strokeStyle = '#25405f'; ctx.lineWidth = 8; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(hx, hyy); ctx.stroke();
+      ctx.strokeStyle = 'rgba(63,230,255,.4)'; ctx.lineWidth = 1.4;
+      ctx.beginPath(); ctx.moveTo(sx, sy - 2.5); ctx.lineTo(hx, hyy - 2.5); ctx.stroke();
+      ctx.fillStyle = '#e8b894';
+      ctx.beginPath(); ctx.arc(hx, hyy, 3.4, 0, TAU); ctx.fill();
+
+      ctx.save();
+      ctx.translate(hx, hyy);
+      ctx.rotate(a);
+      const g2 = ctx.createLinearGradient(0, -6, 0, 6);
+      g2.addColorStop(0, '#3a4d6b');
+      g2.addColorStop(1, '#121d30');
+      ctx.fillStyle = g2;
+      NP.Art.rr(ctx, -4, -6, 26, 12, 3); ctx.fill();
+      ctx.strokeStyle = 'rgba(150,225,255,.45)'; ctx.lineWidth = 1;
+      NP.Art.rr(ctx, -4, -6, 26, 12, 3); ctx.stroke();
+      ctx.fillStyle = accent;
+      ctx.fillRect(2, -4, 10, 2.2);
+      NP.Art.drawGlow(ctx, 7, -2.9, 11, overC ? 'rgba(255,47,125,.9)' : 'rgba(63,230,255,.9)', .5);
+      ctx.fillStyle = '#0e1a2c';
+      NP.Art.rr(ctx, 21, -3.8, 9, 7, 2); ctx.fill();
+      ctx.strokeStyle = 'rgba(63,230,255,.5)'; ctx.lineWidth = 1;
+      NP.Art.rr(ctx, 21, -3.8, 9, 7, 2); ctx.stroke();
+      ctx.restore();
+
+      if (hurt > 0) {
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        NP.Art.drawGlow(ctx, 0, -40, 44, 'rgba(255,90,120,.95)', hurt * 0.85);
+        ctx.restore();
+      }
+    }
+
   };
 })();

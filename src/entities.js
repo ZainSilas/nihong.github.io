@@ -1,20 +1,40 @@
 /* =====================================================================
-   霓虹协议 · entities.js
-   玩家 / 敌人 / 子弹 / 掉落
+   霓虹协议 · entities.js  （横版卷轴版）
+   玩家 / 敌人 / 掉落 —— 采用「脚点 + 矩形碰撞体」的横版模型
    ===================================================================== */
 (function () {
   'use strict';
   const NP = window.NP;
   const TAU = NP.TAU;
-  const C = NP.COL;
+
+  const GRAV = 2600;
+  const JUMP = -900;
+
+  /* 地面 / 平台：返回给定 x 处、脚点 y 以下最近的可站立面 */
+  NP.surfaceAt = function (G, x, feetY, prevFeetY, ignorePlatforms) {
+    let best = G.groundY;
+    if (ignorePlatforms) return best;
+    // 站在地面
+    for (const p of G.platforms) {
+      if (x < p.x - 10 || x > p.x + p.w + 10) continue;
+      if (prevFeetY <= p.y + 2 && feetY >= p.y) {
+        if (p.y < best) best = p.y;
+      }
+    }
+    return best;
+  };
 
   /* =========================== 玩家 =========================== */
   NP.Player = class Player {
     constructor(G) {
       this.G = G;
-      this.x = G.world.w / 2;
-      this.y = G.world.h / 2;
-      this.r = 20;
+      this.x = G.world.w * 0.5;
+      this.y = G.groundY;
+      this.r = 24;          // 半宽
+      this.h = 118;         // 身高（脚点到头顶）
+      this.vx = 0;
+      this.vy = 0;
+      this.onGround = true;
       this.aim = 0;
       this.facing = 1;
       this.level = 1;
@@ -24,11 +44,10 @@
       this.mods = NP.newMods();
       this.cd = { dash: 0, q: 0, e: 0, r: 0 };
       this.over = 0;
-      this.iframe = 1.4;
+      this.iframe = 1.2;
       this.hurt = 0;
       this.dashT = 0;
-      this.dashAng = 0;
-      this.dashTrail = 0;
+      this.dashDir = 1;
       this.walk = 0;
       this.fireT = 0;
       this.shield = 0;
@@ -44,6 +63,8 @@
       this.hp = this.maxHp;
     }
 
+    get chestY() { return this.y - this.h * 0.55; }
+
     recalc(healDelta) {
       const oldMax = this.maxHp || 0;
       this.stats = NP.computeStats(this.level, this.mods, this.G.save.data.up);
@@ -52,7 +73,6 @@
       this.hp = Math.min(this.hp, this.maxHp);
     }
 
-    /* 叠加一张卡 */
     addCard(card) {
       this.stacks[card.id] = (this.stacks[card.id] || 0) + 1;
       this.mods = NP.newMods();
@@ -78,8 +98,6 @@
       if (this.G) this.G.refreshHud();
     }
 
-    get overActive() { return this.over > 0; }
-
     update(dt) {
       const G = this.G;
       const st = this.stats;
@@ -90,80 +108,120 @@
       this.over = Math.max(0, this.over - dt);
       this.muzzle = Math.max(0, this.muzzle - dt * 8);
       this.dashT = Math.max(0, this.dashT - dt);
-      this.dashTrail = Math.max(0, this.dashTrail - dt);
       for (const k in this.cd) if (this.cd[k] > 0) this.cd[k] = Math.max(0, this.cd[k] - dt);
 
-      // 护盾发生器
       if (st.shieldGen > 0) {
         this.shieldT += dt;
         if (this.shieldT >= 12) {
           this.shieldT = 0;
           this.shieldMax = Math.round(this.maxHp * st.shieldGen);
           this.shield = Math.max(this.shield, this.shieldMax);
-          G.fxRing(this.x, this.y, 46, 'rgba(63,230,255,.9)', 0.5);
+          G.fxRing(this.x, this.y - 40, 46, 'rgba(63,230,255,.9)', 0.5);
         }
       }
-
       if (st.regen > 0) this.hp = Math.min(this.maxHp, this.hp + this.maxHp * st.regen * dt);
-      // 脱战 5 秒后缓慢自愈
       this.noHitT += dt;
       if (this.noHitT > 5 && this.hp > 0 && this.hp < this.maxHp) {
         this.hp = Math.min(this.maxHp, this.hp + this.maxHp * 0.012 * dt);
       }
 
-      // 移动输入
-      let mx = 0, my = 0;
-      if (inp.keys.KeyA || inp.keys.ArrowLeft) mx -= 1;
-      if (inp.keys.KeyD || inp.keys.ArrowRight) mx += 1;
-      if (inp.keys.KeyW || inp.keys.ArrowUp) my -= 1;
-      if (inp.keys.KeyS || inp.keys.ArrowDown) my += 1;
-      const ml = Math.hypot(mx, my);
-      if (ml > 1) { mx /= ml; my /= ml; }
-      this.walk = NP.lerp(this.walk, ml > 0.1 ? 1 : 0, Math.min(1, dt * 10));
+      /* ---------- 水平移动 + 跳跃 ---------- */
+      let move = 0;
+      if (inp.keys.KeyA || inp.keys.ArrowLeft) move -= 1;
+      if (inp.keys.KeyD || inp.keys.ArrowRight) move += 1;
+      this.walk = NP.lerp(this.walk, move !== 0 ? 1 : 0, Math.min(1, dt * 10));
 
       const speed = 340 * st.moveMul;
       if (this.dashT > 0) {
-        const ds = 1250;
-        this.x += Math.cos(this.dashAng) * ds * dt;
-        this.y += Math.sin(this.dashAng) * ds * dt;
-        this.ghosts.push({ x: this.x, y: this.y, aim: this.aim, life: 0.28, max: 0.28 });
+        this.vx = this.dashDir * 1150;
       } else {
-        this.x += mx * speed * dt;
-        this.y += my * speed * dt;
+        this.vx = move * speed;
       }
-      const pad = 26;
-      this.x = NP.clamp(this.x, pad, G.world.w - pad);
-      this.y = NP.clamp(this.y, pad, G.world.h - pad);
+
+      const jumpKey = inp.keys.Space || inp.keys.KeyW || inp.keys.ArrowUp;
+      if (jumpKey && this.onGround && this.dashT <= 0) {
+        this.vy = JUMP;
+        this.onGround = false;
+        NP.Audio.sfx('dash');
+        G.burst(this.x, this.y, 6, 'rgba(63,230,255,.75)', 160, { life: 0.3, size: 3 });
+      }
+      if (!jumpKey && this.vy < -300) this.vy = -300;   // 松键短跳
+
+      this.vy = Math.min(1500, this.vy + GRAV * dt);
+
+      const prevY = this.y;
+      this.x += this.vx * dt;
+      this.y += this.vy * dt;
+      this.x = NP.clamp(this.x, this.r + 6, G.world.w - this.r - 6);
+
+      // 按住下键时忽略平台，实现下穿
+      if (inp.keys.KeyS || inp.keys.ArrowDown) this.dropT = 0.22;
+      else this.dropT = Math.max(0, (this.dropT || 0) - dt);
+      const surf = NP.surfaceAt(G, this.x, this.y, prevY, this.dropT > 0);
+      if (this.vy >= 0 && this.y >= surf) {
+        if (!this.onGround) {
+          G.burst(this.x, surf, 8, 'rgba(120,200,255,.5)', 160, { life: 0.3, size: 3 });
+        }
+        this.y = surf;
+        this.vy = 0;
+        this.onGround = true;
+      } else if (this.y > surf + 4) {
+        this.onGround = false;
+      }
 
       for (let i = this.ghosts.length - 1; i >= 0; i--) {
         this.ghosts[i].life -= dt;
         if (this.ghosts[i].life <= 0) this.ghosts.splice(i, 1);
       }
 
-      // 瞄准
+      /* ---------- 瞄准：自动锁定 / 手动接管 ---------- */
+      const cfg = G.save.data.settings;
+      // 鼠标移动超过 2.5px 就临时切回手动瞄准，避免锁定跟手打架
+      const mdx = Math.abs(inp.mouse.x - (this._mx || 0)) + Math.abs(inp.mouse.y - (this._my || 0));
+      this._mx = inp.mouse.x; this._my = inp.mouse.y;
+      if (inp.mouse.down || mdx > 2.5) this.manualT = 0.9;
+      else this.manualT = Math.max(0, (this.manualT || 0) - dt);
+
+      this.lockTarget = null;
       let aimed = false;
       if (G.autoplay) {
-        const target = G.nearestTarget(this.x, this.y, 1400);
-        if (target) { this.aim = Math.atan2(target.y - this.y, target.x - this.x); aimed = true; }
+        const t = G.nearestTarget(this.x, this.chestY, 2000);
+        if (t) {
+          this.lockTarget = t;
+          this.aim = Math.atan2(t.cy - this.chestY, t.x - this.x);
+          aimed = true;
+        }
+      } else if (cfg.lock !== false && this.manualT <= 0) {
+        const t = this.findLockTarget();
+        if (t) {
+          this.lockTarget = t;
+          this.aim = Math.atan2(t.cy - this.chestY, t.x - this.x);
+          aimed = true;
+        }
       }
       if (!aimed) {
         const w = G.cam.screenToWorld(inp.mouse.x, inp.mouse.y);
-        this.aim = Math.atan2(w.y - this.y, w.x - this.x);
+        this.aim = Math.atan2(w.y - this.chestY, w.x - this.x);
       }
-      this.facing = Math.cos(this.aim) >= 0 ? 1 : -1;
 
-      // 射击
+      if (this.lockTarget) this.facing = this.lockTarget.x >= this.x ? 1 : -1;
+      else if (move !== 0) this.facing = move;
+      else if (Math.abs(Math.cos(this.aim)) > 0.2) this.facing = Math.cos(this.aim) > 0 ? 1 : -1;
+
+      /* ---------- 射击 ---------- */
       this.fireT -= dt;
-      const auto = G.save.data.settings.auto || G.autoplay;
-      const wantFire = inp.mouse.down || auto || inp.keys.Space || inp.keys.KeyJ;
+      const auto = cfg.auto || G.autoplay;
+      // 开了锁定且场上没有目标时不自动开火，省得对着空气扫射
+      const autoAllowed = cfg.lock === false || !!this.lockTarget || G.autoplay;
+      const wantFire = inp.mouse.down || inp.keys.KeyJ || (auto && autoAllowed);
       const rate = st.fireRate * (this.over > 0 ? 4 : 1);
-      if (wantFire && this.fireT <= 0 && this.dashT <= 0) {
+      if (wantFire && this.fireT <= 0) {
         this.fireT = 1 / rate;
         this.shoot();
       }
       if (this.fireT < -0.3) this.fireT = 0;
 
-      // 技能按键
+      /* ---------- 技能 ---------- */
       const q = NP.Input.consume();
       for (const code of q) {
         if (code === 'ShiftLeft' || code === 'ShiftRight') this.doDash();
@@ -173,24 +231,46 @@
       }
     }
 
+    /* 选择自动锁定目标：距离优先，背后目标降权，首领优先 */
+    findLockTarget() {
+      const G = this.G;
+      let best = null, bestScore = Infinity;
+      const consider = (e) => {
+        if (!e || e.alive === false || e.dead) return;
+        const cy = (e.cy !== undefined) ? e.cy : e.y;
+        const dx = e.x - this.x, dy = cy - this.chestY;
+        const d = Math.hypot(dx, dy);
+        if (d > 1500) return;
+        let score = d;
+        if (Math.sign(dx) !== this.facing && Math.abs(dx) > 60) score *= 1.4;
+        if (e === G.boss) score *= 0.8;
+        if (score < bestScore) { bestScore = score; best = e; }
+      };
+      for (const m of G.mobs) consider(m);
+      for (const c of G.clones) consider(c);
+      if (G.boss) consider(G.boss);
+      return best;
+    }
+
     shoot() {
       const G = this.G;
       const st = this.stats;
       const overMul = this.over > 0 ? 2.5 : 1;
       const n = 1 + st.multishot;
       const base = st.atk * overMul;
-      const spreadBase = n > 1 ? 0.055 : 0;
+      const spreadBase = n > 1 ? 0.045 : 0;
+      const ox = this.x, oy = this.chestY;
       for (let i = 0; i < n; i++) {
         const off = (i - (n - 1) / 2) * spreadBase * 2;
-        const a = this.aim + off + NP.rand(-0.012, 0.012);
+        const a = this.aim + off + NP.rand(-0.01, 0.01);
         const crit = Math.random() < st.crit;
         const dmg = base * (crit ? st.critDmg : 1);
         G.pBullets.push({
-          x: this.x + Math.cos(this.aim) * 22,
-          y: this.y + Math.sin(this.aim) * 22,
+          x: ox + Math.cos(a) * 30,
+          y: oy + Math.sin(a) * 30,
           vx: Math.cos(a) * st.bulletSpeed,
           vy: Math.sin(a) * st.bulletSpeed,
-          dmg, crit, r: crit ? 5 : 4.2,
+          dmg, crit, r: crit ? 6 : 5,
           life: st.range / st.bulletSpeed,
           pierce: st.pierce, hit: new Set(),
           color: this.over > 0 ? '#ff6ba8' : (crit ? '#ffd76b' : '#8ff3ff')
@@ -206,25 +286,21 @@
       const st = this.stats;
       this.cd.dash = Math.max(0.35, 1.8 * (1 - st.cdr) * (1 - Math.min(0.6, this.mods.dashCdr)));
       this.dashT = 0.16;
-      this.dashTrail = 0.16;
-      this.iframe = Math.max(this.iframe, 0.16);
-      let mx = 0, my = 0;
-      if (NP.Input.keys.KeyA || NP.Input.keys.ArrowLeft) mx -= 1;
-      if (NP.Input.keys.KeyD || NP.Input.keys.ArrowRight) mx += 1;
-      if (NP.Input.keys.KeyW || NP.Input.keys.ArrowUp) my -= 1;
-      if (NP.Input.keys.KeyS || NP.Input.keys.ArrowDown) my += 1;
-      this.dashAng = (mx || my) ? Math.atan2(my, mx) : this.aim;
+      this.iframe = Math.max(this.iframe, 0.18);
+      this.dashDir = (NP.Input.keys.KeyA || NP.Input.keys.ArrowLeft) ? -1
+        : (NP.Input.keys.KeyD || NP.Input.keys.ArrowRight) ? 1
+          : (Math.cos(this.aim) >= 0 ? 1 : -1);
       NP.Audio.sfx('dash');
-      this.G.fxRing(this.x, this.y, 40, 'rgba(63,230,255,.8)', 0.35);
+      this.G.fxRing(this.x, this.y - 40, 40, 'rgba(63,230,255,.8)', 0.35);
     }
 
     doOverclock() {
       if (this.cd.q > 0) return;
-      this.cd.q = 15 * (1 - this.stats.cdr);
+      this.cd.q = 30 * (1 - this.stats.cdr);
       this.over = this.stats.overDur;
       NP.Audio.sfx('overclock');
-      this.G.toast('超频协议 // 攻速 +300% · 伤害 +150% · 吸血 20%');
-      this.G.fxRing(this.x, this.y, 70, 'rgba(255,47,125,.9)', 0.7);
+      this.G.toast('超频协议 // 攻速 +300% · 伤害 +150% · 吸血 10%');
+      this.G.fxRing(this.x, this.y - 40, 70, 'rgba(255,47,125,.9)', 0.7);
       this.G.shake(3);
     }
 
@@ -232,15 +308,16 @@
       if (this.cd.e > 0) return;
       this.cd.e = 15 * (1 - this.stats.cdr);
       const st = this.stats;
-      const heal = Math.round(this.maxHp * 0.5);
+      const heal = Math.round(this.maxHp * 0.3);
       this.hp = Math.min(this.maxHp, this.hp + heal);
-      this.G.fxRing(this.x, this.y, st.empR, 'rgba(63,230,255,.95)', 0.9, 0.55);
-      this.G.fxRing(this.x, this.y, st.empR * 0.6, 'rgba(160,107,255,.8)', 0.7, 0.4);
+      const cy = this.y - 50;
+      this.G.fxRing(this.x, cy, st.empR, 'rgba(63,230,255,.95)', 0.9, 0.55);
+      this.G.fxRing(this.x, cy, st.empR * 0.6, 'rgba(160,107,255,.8)', 0.7, 0.4);
       NP.Audio.sfx('emp');
       this.G.shake(6);
-      this.G.healText(this.x, this.y - 60, heal);
+      this.G.healText(this.x, this.y - 90, heal);
       for (const m of this.G.mobs) {
-        if (NP.dist(m, this) < st.empR + m.r) {
+        if (NP.dist({ x: m.x, y: m.y - m.h * 0.5 }, { x: this.x, y: cy }) < st.empR + m.r) {
           m.stun = Math.max(m.stun, 5);
           m.hitFlash = 1;
           if (st.empDmg > 0) this.G.damageMob(m, st.atk * 1.2, false, false);
@@ -248,14 +325,14 @@
       }
       const targets = [this.G.boss, ...this.G.clones].filter(Boolean);
       for (const b of targets) {
-        if (NP.dist(b, this) < st.empR + b.r) {
+        if (NP.dist(b, { x: this.x, y: cy }) < st.empR + b.r) {
           b.stun = Math.max(b.stun || 0, 1.4);
           b.hitFlash = 1;
           this.G.text('压制 1.4s', b.x, b.y - b.r - 20, '#9beeff', 15);
           if (st.empDmg > 0) this.G.damageBoss(b, st.atk * 1.5, false, false);
         }
       }
-      this.G.toast('电磁脉冲 // 全域压制 5s · 生命 +50%');
+      this.G.toast('电磁脉冲 // 全域压制 5s · 生命 +30%');
     }
 
     doLaser() {
@@ -263,8 +340,8 @@
       this.cd.r = 8 * (1 - this.stats.cdr);
       const st = this.stats;
       const dmg = (1000 + 0.08 * st.atk + 0.02 * this.maxHp) * st.laserMul;
-      const len = 1500;
-      const ox = this.x + Math.cos(this.aim) * 26, oy = this.y + Math.sin(this.aim) * 26;
+      const len = 1600;
+      const ox = this.x + Math.cos(this.aim) * 30, oy = this.chestY + Math.sin(this.aim) * 30;
       this.G.beams.push({
         x1: ox, y1: oy,
         x2: ox + Math.cos(this.aim) * len, y2: oy + Math.sin(this.aim) * len,
@@ -278,7 +355,7 @@
     takeDamage(raw) {
       const G = this.G;
       if (this.dashT > 0 || this.iframe > 0) {
-        if (this.dashT > 0) G.text('MISS', this.x + NP.rand(-14, 14), this.y - 70, '#8ff3ff', 15);
+        if (this.dashT > 0) G.text('MISS', this.x + NP.rand(-14, 14), this.y - 120, '#8ff3ff', 15);
         return false;
       }
       let dmg = raw * this.stats.takenMul;
@@ -286,25 +363,24 @@
         const absorbed = Math.min(this.shield, dmg);
         this.shield -= absorbed;
         dmg -= absorbed;
-        if (absorbed > 0) G.text(`-${Math.round(absorbed)} 护盾`, this.x, this.y - 66, '#9beeff', 13);
+        if (absorbed > 0) G.text(`-${Math.round(absorbed)} 护盾`, this.x, this.y - 110, '#9beeff', 13);
       }
       if (dmg >= 1) {
         this.hp -= dmg;
-        this.noHitT = 0;
         this.hurt = 1;
-        this.iframe = 0.4;
+        this.noHitT = 0;
+        this.iframe = 0.45;
         G.shake(5 + Math.min(8, dmg / this.maxHp * 40));
         G.hurtFlash = 1;
-        if (G.save.data.settings.dmgNum) G.text(`-${Math.round(dmg)}`, this.x + NP.rand(-10, 10), this.y - 62, '#ff5d7b', 17);
+        if (G.save.data.settings.dmgNum) G.text(`-${Math.round(dmg)}`, this.x + NP.rand(-10, 10), this.y - 100, '#ff5d7b', 17);
         NP.Audio.sfx('hurt');
       }
       if (this.hp <= 0) { this.hp = 0; G.onPlayerDeath(); }
       return true;
     }
 
-    /* 造成伤害后触发吸血 */
-    onDamageDealt(amount, crit) {
-      const ls = this.stats.lifesteal + (this.over > 0 ? 0.2 : 0);
+    onDamageDealt(amount) {
+      const ls = this.stats.lifesteal + (this.over > 0 ? 0.1 : 0);
       if (ls > 0 && this.hp > 0) this.hp = Math.min(this.maxHp, this.hp + amount * ls);
     }
 
@@ -313,65 +389,101 @@
       for (const gh of this.ghosts) {
         const a = gh.life / gh.max;
         ctx.save();
-        ctx.globalAlpha = a * 0.4;
-        NP.Art.drawHero(ctx, { x: gh.x, y: gh.y, scale: 1, aim: gh.aim, facing: Math.cos(gh.aim) >= 0 ? 1 : -1, t, over, showGun: false });
+        ctx.globalAlpha = a * 0.35;
+        ctx.translate(gh.x, gh.y);
+        ctx.scale(this.facing, 1);
+        NP.Art.drawHeroSide(ctx, { over, t, walk: 0, aim: gh.aim, dash: 1 });
         ctx.restore();
       }
+
+      // 地面光环
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const rg = ctx.createRadialGradient(this.x, this.y + 2, 2, this.x, this.y + 2, 46);
+      rg.addColorStop(0, over ? 'rgba(255,47,125,.35)' : 'rgba(63,230,255,.26)');
+      rg.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = rg;
+      ctx.beginPath(); ctx.ellipse(this.x, this.y + 2, 46, 11, 0, 0, TAU); ctx.fill();
+      ctx.restore();
+
       if (this.shield > 0) {
         ctx.save();
         ctx.globalCompositeOperation = 'lighter';
-        const a = 0.25 + 0.15 * Math.sin(t * 8);
-        ctx.strokeStyle = `rgba(63,230,255,${a + 0.25})`;
+        const a = 0.22 + 0.12 * Math.sin(t * 8);
+        ctx.strokeStyle = `rgba(63,230,255,${a + 0.22})`;
         ctx.lineWidth = 2;
-        ctx.beginPath(); ctx.arc(this.x, this.y - 24, 52, 0, TAU); ctx.stroke();
-        ctx.fillStyle = `rgba(63,230,255,${a * 0.35})`;
-        ctx.beginPath(); ctx.arc(this.x, this.y - 24, 52, 0, TAU); ctx.fill();
+        ctx.beginPath(); ctx.ellipse(this.x, this.y - 60, 46, 66, 0, 0, TAU); ctx.stroke();
+        ctx.fillStyle = `rgba(63,230,255,${a * 0.3})`;
+        ctx.beginPath(); ctx.ellipse(this.x, this.y - 60, 46, 66, 0, 0, TAU); ctx.fill();
         ctx.restore();
       }
-      // 脚下光环，突出角色位置
+
       ctx.save();
-      ctx.globalCompositeOperation = 'lighter';
-      const rg = ctx.createRadialGradient(this.x, this.y + 2, 2, this.x, this.y + 2, 40);
-      rg.addColorStop(0, over ? 'rgba(255,47,125,.35)' : 'rgba(63,230,255,.28)');
-      rg.addColorStop(1, 'rgba(0,0,0,0)');
-      ctx.fillStyle = rg;
-      ctx.beginPath(); ctx.ellipse(this.x, this.y + 2, 40, 14, 0, 0, TAU); ctx.fill();
-      ctx.strokeStyle = over ? 'rgba(255,47,125,.5)' : 'rgba(63,230,255,.35)';
-      ctx.lineWidth = 1.5;
-      ctx.beginPath(); ctx.ellipse(this.x, this.y + 2, 30, 10, 0, 0, TAU); ctx.stroke();
+      ctx.translate(this.x, this.y);
+      ctx.scale(1.6 * this.facing, 1.6);
+      NP.Art.drawHeroSide(ctx, {
+        over, hurt: this.hurt, t,
+        walk: this.onGround ? this.walk : 0.15,
+        air: !this.onGround,
+        aim: this.facing >= 0 ? this.aim : Math.PI - this.aim,
+        dash: this.dashT > 0 ? 1 : 0
+      });
       ctx.restore();
 
-      NP.Art.drawHero(ctx, {
-        x: this.x, y: this.y, scale: 1.12, aim: this.aim, facing: this.facing, t,
-        over, hurt: this.hurt, dash: this.dashT > 0 ? 1 : 0, walk: this.walk
-      });
+      // 锁定标记
+      const lt = this.lockTarget;
+      if (lt && lt.alive !== false) {
+        const cy = (lt.cy !== undefined) ? lt.cy : lt.y - 40;
+        const rr = Math.max(22, (lt.r || 24) * 1.5);
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.strokeStyle = 'rgba(255,80,140,.85)';
+        ctx.lineWidth = 2;
+        const s2 = rr * 0.55;
+        const corners = [[-1, -1], [1, -1], [-1, 1], [1, 1]];
+        for (const [sx, sy] of corners) {
+          ctx.beginPath();
+          ctx.moveTo(lt.x + sx * rr, cy + sy * rr - sy * s2);
+          ctx.lineTo(lt.x + sx * rr, cy + sy * rr);
+          ctx.lineTo(lt.x + sx * rr - sx * s2, cy + sy * rr);
+          ctx.stroke();
+        }
+        ctx.strokeStyle = 'rgba(63,230,255,.5)';
+        ctx.lineWidth = 1.4;
+        ctx.beginPath();
+        ctx.arc(lt.x, cy, rr * (1.05 + Math.sin(t * 6) * 0.04), 0, TAU);
+        ctx.stroke();
+        ctx.restore();
+      }
+
       if (this.muzzle > 0.35) {
-        const mx = this.x + Math.cos(this.aim) * 34;
-        const my = this.y - 38 + Math.sin(this.aim) * 34;
-        NP.Art.drawGlow(ctx, mx, my, 26 * this.muzzle, this.over > 0 ? 'rgba(255,120,180,.9)' : 'rgba(150,240,255,.9)', 0.85);
+        const mx = this.x + Math.cos(this.aim) * 62;
+        const my = this.chestY + Math.sin(this.aim) * 62;
+        NP.Art.drawGlow(ctx, mx, my, 30 * this.muzzle, over ? 'rgba(255,120,180,.9)' : 'rgba(150,240,255,.9)', 0.85);
       }
-      if (over) {
-        NP.Art.drawGlow(ctx, this.x, this.y - 30, 80, 'rgba(255,47,125,.5)', 0.35 + 0.1 * Math.sin(t * 10));
-      }
+      if (over) NP.Art.drawGlow(ctx, this.x, this.y - 60, 90, 'rgba(255,47,125,.5)', 0.35 + 0.1 * Math.sin(t * 10));
     }
   };
 
   /* =========================== 敌人 =========================== */
   const MOB_DEF = {
-    assault: { hp: 250, atk: 74, def: 18, spd: 215, r: 19, color: '#ff6b3c', name: '锋刃' },
-    tank: { hp: 380, atk: 52, def: 125, spd: 100, r: 27, color: '#37d9c4', name: '壁垒' },
-    brute: { hp: 700, atk: 72, def: 45, spd: 118, r: 33, color: '#b06bff', name: '肉山' }
+    assault: { hp: 250, atk: 74, def: 18, spd: 240, r: 20, h: 66, color: '#ff6b3c', name: '锋刃' },
+    tank: { hp: 380, atk: 52, def: 125, spd: 105, r: 28, h: 88, color: '#37d9c4', name: '壁垒' },
+    brute: { hp: 700, atk: 72, def: 45, spd: 120, r: 38, h: 96, color: '#b06bff', name: '肉山' }
   };
   NP.MOB_DEF = MOB_DEF;
 
   NP.Mob = class Mob {
-    constructor(G, type, x, y) {
+    constructor(G, type, x, y, air) {
       const d = MOB_DEF[type];
       this.G = G;
       this.type = type;
-      this.x = x; this.y = y;
+      this.x = x;
+      this.y = y;
       this.r = d.r;
-      this.vx = 0; this.vy = 0;
+      this.h = d.h;
+      this.air = !!air;
+      this.baseY = y;
       const diff = G.diffData;
       const growth = 1 + G.kills * 0.0055;
       this.maxHp = Math.round(d.hp * diff.mobHp * growth);
@@ -386,12 +498,14 @@
       this.spawnT = 0.45;
       this.dead = false;
       this.orbit = NP.rand(-1, 1) > 0 ? 1 : -1;
-      this.dashCd = NP.rand(1.5, 3.6);
+      this.dashCd = NP.rand(1.6, 3.4);
       this.dashT = 0;
-      this.dashAng = 0;
+      this.dashDir = 1;
+      this.vx = 0;
     }
 
     get alive() { return !this.dead && this.hp > 0; }
+    get cy() { return this.y - this.h * 0.5; }
 
     update(dt) {
       const G = this.G;
@@ -400,68 +514,67 @@
       if (this.spawnT > 0) { this.spawnT -= dt; return; }
       if (this.stun > 0) {
         this.stun -= dt;
-        this.vx *= 0.9; this.vy *= 0.9;
-        this.x += this.vx * dt; this.y += this.vy * dt;
+        if (this.air) this.y = this.baseY + Math.sin(G.time * 3 + this.phase) * 6;
         return;
       }
       const p = G.player;
-      const ang = Math.atan2(p.y - this.y, p.x - this.x);
-      const d = Math.hypot(p.x - this.x, p.y - this.y);
+      const dx = p.x - this.x;
+      const dir = dx >= 0 ? 1 : -1;
+      const distX = Math.abs(dx);
       this.attackCd -= dt;
       this.dashCd -= dt;
+
+      if (this.air) {
+        // 空中单位：悬停 + 缓慢贴近
+        this.baseY = NP.clamp(this.baseY + (dir * 0), 120, G.groundY - 60);
+        this.x += dir * this.speed * 0.55 * dt;
+        this.y = this.baseY + Math.sin(G.time * 3 + this.phase) * 10;
+        if (this.attackCd <= 0 && distX < 620) {
+          this.attackCd = NP.rand(2.2, 3.2);
+          G.spawnMobBullet(this.x, this.cy, Math.atan2(p.chestY - this.cy, p.x - this.x), 340, this.atk, 8, MOB_DEF[this.type].color);
+        }
+        this.contactHit(p);
+        return;
+      }
 
       if (this.type === 'assault') {
         if (this.dashT > 0) {
           this.dashT -= dt;
-          this.x += Math.cos(this.dashAng) * 620 * dt;
-          this.y += Math.sin(this.dashAng) * 620 * dt;
-          G.burst(this.x, this.y, 1, 'rgba(255,107,60,.8)', 40, { life: 0.25, size: 2 });
+          this.x += this.dashDir * 700 * dt;
+          G.burst(this.x, this.cy, 1, 'rgba(255,107,60,.8)', 40, { life: 0.25, size: 2 });
         } else {
-          if (this.dashCd <= 0 && d < 420 && d > 90) {
-            this.dashCd = NP.rand(2.6, 4.4);
-            this.dashT = 0.26;
-            this.dashAng = ang;
-            G.fxRing(this.x, this.y, 26, 'rgba(255,107,60,.8)', 0.3);
+          if (this.dashCd <= 0 && distX < 420 && distX > 60) {
+            this.dashCd = NP.rand(2.4, 4);
+            this.dashT = 0.28;
+            this.dashDir = dir;
+            G.fxRing(this.x, this.cy, 26, 'rgba(255,107,60,.8)', 0.3);
           }
-          const targetAng = ang + Math.sin(G.time * 1.4 + this.phase) * 0.35;
-          this.vx = Math.cos(targetAng) * this.speed;
-          this.vy = Math.sin(targetAng) * this.speed;
+          this.x += dir * this.speed * dt;
         }
       } else if (this.type === 'tank') {
-        const want = d > 330 ? 1 : d < 240 ? -0.5 : 0;
-        this.vx = Math.cos(ang) * this.speed * want;
-        this.vy = Math.sin(ang) * this.speed * want;
-        this.vx += Math.cos(ang + Math.PI / 2) * this.speed * 0.35 * this.orbit;
-        this.vy += Math.sin(ang + Math.PI / 2) * this.speed * 0.35 * this.orbit;
-        if (this.attackCd <= 0 && d < 760) {
-          this.attackCd = NP.rand(2.4, 3.2);
-          G.spawnMobBullet(this.x, this.y, ang + NP.rand(-0.06, 0.06), 320, this.atk, 8, '#37d9c4');
+        const want = distX > 300 ? 1 : distX < 200 ? -0.6 : 0;
+        this.x += dir * this.speed * want * dt;
+        if (this.attackCd <= 0 && distX < 760) {
+          this.attackCd = NP.rand(2.3, 3.1);
+          G.spawnMobBullet(this.x, this.cy, Math.atan2(p.chestY - this.cy, p.x - this.x), 360, this.atk, 8, MOB_DEF.tank.color);
         }
       } else {
-        const wob = Math.sin(G.time * 2 + this.phase) * 0.25;
-        this.vx = Math.cos(ang + wob) * this.speed;
-        this.vy = Math.sin(ang + wob) * this.speed;
-      }
-
-      for (const o of G.mobs) {
-        if (o === this || !o.alive) continue;
-        const dx = this.x - o.x, dy = this.y - o.y;
-        const dd = dx * dx + dy * dy;
-        const minD = this.r + o.r;
-        if (dd > 0.01 && dd < minD * minD) {
-          const dl = Math.sqrt(dd);
-          const push = (minD - dl) / dl * 0.5;
-          this.vx += dx * push * 8;
-          this.vy += dy * push * 8;
+        this.x += dir * this.speed * dt;
+        if (this.attackCd <= 0 && distX < 90) {
+          this.attackCd = 1.4;
         }
       }
 
-      this.x += this.vx * dt;
-      this.y += this.vy * dt;
-      this.x = NP.clamp(this.x, 20, G.world.w - 20);
-      this.y = NP.clamp(this.y, 20, G.world.h - 20);
+      this.y = G.groundY;
+      this.x = NP.clamp(this.x, this.r + 4, G.world.w - this.r - 4);
+      this.contactHit(p);
+    }
 
-      if (d < this.r + p.r + 2 && this.attackCd <= 0) {
+    contactHit(p) {
+      const pad = this.r + p.r;
+      const overlapping = Math.abs(p.x - this.x) < pad &&
+        p.y > this.y - this.h - 10 && p.y - p.h < this.y + 10;
+      if (overlapping && this.attackCd <= 0) {
         this.attackCd = this.type === 'assault' ? 1.0 : 1.35;
         p.takeDamage(this.atk * (this.type === 'brute' ? 1.25 : 1));
       }
@@ -474,20 +587,20 @@
         ctx.globalCompositeOperation = 'lighter';
         ctx.strokeStyle = `rgba(255,47,125,${a * 0.9})`;
         ctx.lineWidth = 2;
-        ctx.beginPath(); ctx.ellipse(this.x, this.y + this.r * 0.6, this.r * (2 - a), this.r * 0.5, 0, 0, TAU); ctx.stroke();
+        ctx.beginPath(); ctx.ellipse(this.x, this.y, this.r * (2 - a), this.r * 0.4, 0, 0, TAU); ctx.stroke();
         ctx.restore();
       }
+      const face = (this.G.player.x >= this.x) ? 1 : -1;
       ctx.save();
       ctx.translate(this.x, this.y);
-      const p = this.G.player;
-      const ang = Math.atan2(p.y - this.y, p.x - this.x);
-      const flash = this.hitFlash;
+      ctx.scale(face, 1);
       ctx.fillStyle = 'rgba(0,0,0,.35)';
-      ctx.beginPath(); ctx.ellipse(0, this.r * 0.75, this.r * 0.9, this.r * 0.34, 0, 0, TAU); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(0, 2, this.r * 0.95, this.r * 0.28, 0, 0, TAU); ctx.fill();
+      const flash = this.hitFlash;
 
-      if (this.type === 'assault') this.drawAssault(ctx, t, ang, flash);
-      else if (this.type === 'tank') this.drawTank(ctx, t, ang, flash);
-      else this.drawBrute(ctx, t, ang, flash);
+      if (this.type === 'assault') this.drawAssault(ctx, t, flash);
+      else if (this.type === 'tank') this.drawTank(ctx, t, flash);
+      else this.drawBrute(ctx, t, flash);
 
       if (this.stun > 0) {
         ctx.save();
@@ -496,9 +609,7 @@
         ctx.lineWidth = 2;
         for (let i = 0; i < 3; i++) {
           const a = t * 4 + i * 2.1;
-          ctx.beginPath();
-          ctx.arc(Math.cos(a) * 20, -this.r - 16 + Math.sin(a) * 5, 2.4, 0, TAU);
-          ctx.stroke();
+          ctx.beginPath(); ctx.arc(Math.cos(a) * 20, -this.h - 14 + Math.sin(a) * 5, 2.4, 0, TAU); ctx.stroke();
         }
         ctx.restore();
       }
@@ -506,7 +617,7 @@
 
       if (this.hp < this.maxHp) {
         const w = this.r * 2.2, h = 3.5;
-        const x = this.x - w / 2, y = this.y - this.r - 16;
+        const x = this.x - w / 2, y = this.y - this.h - 14;
         ctx.fillStyle = 'rgba(0,0,0,.6)';
         ctx.fillRect(x, y, w, h);
         ctx.fillStyle = this.type === 'tank' ? '#37d9c4' : this.type === 'brute' ? '#b06bff' : '#ff6b3c';
@@ -514,152 +625,147 @@
       }
     }
 
-    drawAssault(ctx, t, ang, flash) {
-      const bob = Math.sin(t * 8 + this.phase) * 2;
-      NP.Art.drawGlow(ctx, 0, 4 + bob, 24, 'rgba(255,107,60,.55)', 0.6);
-      ctx.save();
-      ctx.rotate(ang);
-      ctx.fillStyle = '#42160e';
-      NP.Art.poly(ctx, [[8, -16], [30, -9], [30, -4], [8, -4]]); ctx.fill();
-      NP.Art.poly(ctx, [[8, 16], [30, 9], [30, 4], [8, 4]]); ctx.fill();
+    drawAssault(ctx, t, flash) {
+      const bob = Math.sin(t * 10 + this.phase) * 2;
+      NP.Art.drawGlow(ctx, 0, -8, 26, 'rgba(255,107,60,.5)', 0.55);
+      // 刀刃
+      NP.Art.poly(ctx, [[10, -40], [32, -46], [34, -40], [12, -34]]); ctx.fillStyle = '#42160e'; ctx.fill();
+      NP.Art.poly(ctx, [[10, -30], [30, -24], [28, -18], [8, -24]]); ctx.fill();
       ctx.strokeStyle = 'rgba(255,140,90,.9)'; ctx.lineWidth = 1.5;
-      ctx.beginPath(); ctx.moveTo(28, -7); ctx.lineTo(9, -6); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(28, 7); ctx.lineTo(9, 6); ctx.stroke();
-      ctx.restore();
-      const g = ctx.createLinearGradient(0, -18, 0, 18);
+      ctx.beginPath(); ctx.moveTo(31, -43); ctx.lineTo(12, -37); ctx.stroke();
+      // 躯干
+      const g = ctx.createLinearGradient(0, -46, 0, 0);
       g.addColorStop(0, '#5a2416');
       g.addColorStop(1, '#2a0f0a');
       ctx.fillStyle = g;
-      NP.Art.poly(ctx, [[0, -17], [15, -8], [15, 8], [0, 17], [-15, 8], [-15, -8]]);
+      NP.Art.poly(ctx, [[-14, -6], [-10, -44 + bob], [10, -44 + bob], [16, -14], [8, 0], [-8, 0]]);
       ctx.fill();
       ctx.strokeStyle = flash > 0 ? '#fff' : 'rgba(255,107,60,.95)';
       ctx.lineWidth = 1.8; ctx.stroke();
-      const ex = Math.cos(ang) * 4, ey = Math.sin(ang) * 4;
+      // 眼
       ctx.fillStyle = '#ff3b2f';
-      ctx.beginPath(); ctx.arc(ex, ey, 5.5, 0, TAU); ctx.fill();
-      NP.Art.drawGlow(ctx, ex, ey, 18, 'rgba(255,90,60,.95)', 0.8 + 0.2 * Math.sin(t * 6));
-      ctx.fillStyle = '#ffe0c0';
-      ctx.beginPath(); ctx.arc(ex + Math.cos(ang) * 1.5, ey + Math.sin(ang) * 1.5, 2, 0, TAU); ctx.fill();
+      ctx.beginPath(); ctx.arc(6, -34 + bob, 5, 0, TAU); ctx.fill();
+      NP.Art.drawGlow(ctx, 6, -34 + bob, 18, 'rgba(255,90,60,.95)', 0.8);
+      // 腿
+      ctx.fillStyle = '#31120c';
+      Art_rr(ctx, -12, -14, 8, 14, 3);
+      Art_rr(ctx, 4, -14, 8, 14, 3);
     }
 
-    drawTank(ctx, t, ang, flash) {
-      ctx.save();
-      ctx.rotate(ang);
-      const sg = ctx.createLinearGradient(10, 0, 40, 0);
-      sg.addColorStop(0, 'rgba(55,217,196,.35)');
-      sg.addColorStop(1, 'rgba(55,217,196,.05)');
-      ctx.fillStyle = sg;
-      NP.Art.poly(ctx, [[12, -24], [34, -16], [36, 0], [34, 16], [12, 24], [8, 0]]);
-      ctx.fill();
+    drawTank(ctx, t, flash) {
+      const bob = Math.sin(t * 3 + this.phase) * 1.5;
+      // 正面护盾
+      NP.Art.poly(ctx, [[16, -70], [34, -60], [34, -14], [16, -6]]);
+      ctx.fillStyle = 'rgba(55,217,196,.28)'; ctx.fill();
       ctx.strokeStyle = 'rgba(55,217,196,.85)'; ctx.lineWidth = 2; ctx.stroke();
-      ctx.strokeStyle = 'rgba(180,255,245,.5)'; ctx.lineWidth = 1;
-      for (let i = -2; i <= 2; i++) {
-        ctx.beginPath(); ctx.moveTo(20, i * 7); ctx.lineTo(31, i * 6); ctx.stroke();
-      }
-      ctx.restore();
-      const g = ctx.createLinearGradient(0, -22, 0, 22);
+      // 机体
+      const g = ctx.createLinearGradient(0, -80, 0, 0);
       g.addColorStop(0, '#1d4f4c');
       g.addColorStop(1, '#0b2422');
       ctx.fillStyle = g;
-      NP.Art.rr(ctx, -20, -22, 40, 44, 9); ctx.fill();
+      Art_rr(ctx, -26, -80 + bob, 44, 80, 9);
       ctx.strokeStyle = flash > 0 ? '#fff' : 'rgba(55,217,196,.9)';
-      ctx.lineWidth = 2; NP.Art.rr(ctx, -20, -22, 40, 44, 9); ctx.stroke();
-      ctx.fillStyle = 'rgba(55,217,196,.15)';
-      NP.Art.rr(ctx, -15, -16, 30, 12, 4); ctx.fill();
-      ctx.strokeStyle = 'rgba(55,217,196,.4)'; ctx.lineWidth = 1;
-      NP.Art.rr(ctx, -15, -16, 30, 12, 4); ctx.stroke();
-      NP.Art.rr(ctx, -15, 3, 30, 12, 4); ctx.fill(); ctx.stroke();
-      const ex = Math.cos(ang) * 6, ey = Math.sin(ang) * 3;
+      ctx.lineWidth = 2; ctx.stroke();
+      // 装甲板
+      ctx.fillStyle = 'rgba(55,217,196,.18)';
+      Art_rr(ctx, -20, -70 + bob, 32, 16, 4);
+      Art_rr(ctx, -20, -46 + bob, 32, 16, 4);
+      // 眼
       ctx.fillStyle = '#b6fff2';
-      NP.Art.rr(ctx, ex - 5, ey - 2, 10, 4, 2); ctx.fill();
-      NP.Art.drawGlow(ctx, ex, ey, 20, 'rgba(55,217,196,.8)', 0.6);
+      Art_rr(ctx, 2, -62 + bob, 12, 4, 2);
+      NP.Art.drawGlow(ctx, 8, -60 + bob, 20, 'rgba(55,217,196,.8)', 0.6);
+      // 履带
       ctx.fillStyle = '#12332f';
-      NP.Art.rr(ctx, -24, -10, 6, 20, 3); ctx.fill();
-      NP.Art.rr(ctx, 18, -10, 6, 20, 3); ctx.fill();
+      Art_rr(ctx, -28, -12, 48, 12, 5);
     }
 
-    drawBrute(ctx, t, ang, flash) {
+    drawBrute(ctx, t, flash) {
       const bob = Math.sin(t * 3.2 + this.phase) * 3;
-      ctx.save();
-      ctx.translate(0, bob * 0.4);
-      ctx.strokeStyle = 'rgba(176,107,255,.55)';
+      ctx.strokeStyle = 'rgba(176,107,255,.5)';
       ctx.lineWidth = 6; ctx.lineCap = 'round';
-      for (let i = 0; i < 5; i++) {
-        const a = (i / 5) * TAU + t * 0.8;
+      for (let i = 0; i < 4; i++) {
+        const a = (i / 4) * TAU + t * 0.8;
         ctx.beginPath();
-        ctx.moveTo(Math.cos(a) * 16, Math.sin(a) * 12 + 6);
-        ctx.quadraticCurveTo(Math.cos(a) * 26, Math.sin(a) * 22 + 12 + Math.sin(t * 3 + i) * 5, Math.cos(a) * 34, Math.sin(a) * 30 + 16);
+        ctx.moveTo(Math.cos(a) * 18, -20 + Math.sin(a) * 12);
+        ctx.quadraticCurveTo(Math.cos(a) * 30, -34 + Math.sin(a) * 20, Math.cos(a) * 34, -46 + Math.sin(a) * 24);
         ctx.stroke();
       }
-      const g = ctx.createRadialGradient(-6, -8, 4, 0, 0, this.r + 6);
+      const g = ctx.createRadialGradient(-6, -60, 6, 0, -46, this.r + 14);
       g.addColorStop(0, '#8a4be0');
       g.addColorStop(0.6, '#58258f');
       g.addColorStop(1, '#2a0d44');
       ctx.fillStyle = g;
       ctx.beginPath();
-      for (let i = 0; i <= 14; i++) {
-        const a = (i / 14) * TAU;
+      for (let i = 0; i <= 16; i++) {
+        const a = (i / 16) * TAU;
         const rr = this.r * (1 + Math.sin(a * 3 + t * 2.4 + this.phase) * 0.06);
-        const px = Math.cos(a) * rr, py = Math.sin(a) * rr * 0.92;
+        const px = Math.cos(a) * rr * 1.05, py = -48 + Math.sin(a) * rr * 1.15 + bob * 0.4;
         i ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
       }
       ctx.closePath(); ctx.fill();
       ctx.strokeStyle = flash > 0 ? '#fff' : 'rgba(200,150,255,.85)';
       ctx.lineWidth = 2; ctx.stroke();
       for (let i = 0; i < 3; i++) {
-        const ea = ang + (i - 1) * 0.5;
-        const ex = Math.cos(ea) * 13, ey = Math.sin(ea) * 10 - 2;
+        const ex = 6 + i * 9, ey = -62 + (i % 2) * 8;
         ctx.fillStyle = i === 1 ? '#ffe066' : '#ff5ea8';
         ctx.beginPath(); ctx.arc(ex, ey, i === 1 ? 5 : 3.5, 0, TAU); ctx.fill();
         NP.Art.drawGlow(ctx, ex, ey, i === 1 ? 20 : 14, i === 1 ? 'rgba(255,224,102,.9)' : 'rgba(255,94,168,.85)', 0.7);
       }
-      ctx.fillStyle = 'rgba(10,4,18,.9)';
-      ctx.beginPath(); ctx.ellipse(Math.cos(ang) * 8, Math.sin(ang) * 8 + 8, 9, 5, ang, 0, TAU); ctx.fill();
-      ctx.restore();
     }
   };
+
+  function Art_rr(ctx, x, y, w, h, r) {
+    NP.Art.rr(ctx, x, y, w, h, r);
+    ctx.fill();
+  }
 
   /* =========================== 掉落 =========================== */
   NP.Orb = class Orb {
     constructor(x, y, kind) {
       this.x = x; this.y = y;
       this.kind = kind;
-      this.vx = NP.rand(-70, 70); this.vy = NP.rand(-130, -40);
-      this.life = 10; this.t = 0; this.r = 9;
+      this.vx = NP.rand(-90, 90);
+      this.vy = NP.rand(-320, -180);
+      this.life = 12; this.t = 0; this.r = 10;
       this.magnet = false;
+      this.grounded = false;
     }
     update(dt, G) {
       this.t += dt;
       this.life -= dt;
       const p = G.player;
-      const d = NP.dist(this, p);
-      if (d < 190) this.magnet = true;
+      const d = Math.hypot(this.x - p.x, this.y - (p.y - 50));
+      if (d < 240) this.magnet = true;
       if (this.magnet) {
-        const a = Math.atan2(p.y - this.y, p.x - this.x);
-        this.x += Math.cos(a) * 520 * dt;
-        this.y += Math.sin(a) * 520 * dt;
-      } else {
-        this.x += this.vx * dt; this.y += this.vy * dt;
-        this.vx *= 0.94; this.vy *= 0.94;
+        const a = Math.atan2((p.y - 50) - this.y, p.x - this.x);
+        this.x += Math.cos(a) * 620 * dt;
+        this.y += Math.sin(a) * 620 * dt;
+      } else if (!this.grounded) {
+        this.vy += 2200 * dt;
+        this.x += this.vx * dt;
+        this.y += this.vy * dt;
+        this.vx *= 0.96;
+        if (this.y >= G.groundY) { this.y = G.groundY; this.vy = 0; this.grounded = true; }
       }
-      if (d < 26) { G.collectOrb(this); return false; }
+      if (d < 30) { G.collectOrb(this); return false; }
       return this.life > 0;
     }
     draw(ctx, t) {
+      const y = this.y - 12 - Math.sin(t * 3 + this.x) * 3;
       if (this.kind === 'heal') {
         const s = 1 + Math.sin(t * 8) * 0.12;
         ctx.save();
-        ctx.translate(this.x, this.y);
+        ctx.translate(this.x, y);
         ctx.scale(s, s);
         ctx.fillStyle = 'rgba(182,255,74,.9)';
-        NP.Art.rr(ctx, -8, -2.5, 16, 5, 2); ctx.fill();
-        NP.Art.rr(ctx, -2.5, -8, 5, 16, 2); ctx.fill();
-        NP.Art.drawGlow(ctx, 0, 0, 22, 'rgba(182,255,74,.8)', 0.55);
+        NP.Art.rr(ctx, -9, -3, 18, 6, 3); ctx.fill();
+        NP.Art.rr(ctx, -3, -9, 6, 18, 3); ctx.fill();
+        NP.Art.drawGlow(ctx, 0, 0, 24, 'rgba(182,255,74,.8)', 0.55);
         ctx.restore();
       } else {
         const s = 1 + Math.sin(t * 10 + this.x) * 0.1;
         ctx.save();
-        ctx.translate(this.x, this.y);
+        ctx.translate(this.x, y);
         ctx.rotate(Math.PI / 4);
         ctx.scale(s, s);
         const g = ctx.createLinearGradient(-7, -7, 7, 7);
